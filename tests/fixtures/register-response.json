@@ -1,0 +1,8 @@
+{
+  "alias": "Nice Orange",
+  "version": "2.0",
+  "deviceModel": "Samsung",
+  "deviceType": "mobile",
+  "fingerprint": "random string",
+  "download": true
+}

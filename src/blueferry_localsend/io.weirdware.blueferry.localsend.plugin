@@ -1,0 +1,71 @@
+[BlueFerry Plugin]
+Id=io.weirdware.blueferry.localsend
+Name=LocalSend
+Version=0.1.0
+ApiVersion=1.2
+MinBlueFerry=0.9
+Capabilities=card;share;notify;
+Homepage=https://github.com/joshii-h/blueferry-plugin-localsend
+Source=https://github.com/joshii-h/blueferry-plugin-localsend
+Exec=blueferry-localsend serve
+Cli=blueferry-localsend
+Alias=localsend
+
+[Config device_name]
+Label=Device name
+Type=string
+Help=How this computer appears in LocalSend; empty uses the host name
+
+[Config visible]
+Label=Visible
+Type=bool
+Default=true
+Help=Answer LocalSend devices on the network; off means no receiving
+
+[Config download_dir]
+Label=Download folder
+Type=string
+Help=Where received files go; empty uses ~/Downloads/iPhone
+
+[Config max_size_mb]
+Label=Size limit (MB)
+Type=int
+Default=4096
+Min=1
+Max=1048576
+Help=Requests above this total size are declined
+
+[Config auto_accept_trusted]
+Label=Accept trusted devices automatically
+Type=bool
+Default=false
+Help=Only devices marked with "Trust device" whose certificate matches
+
+[Config require_pin]
+Label=Require PIN
+Type=bool
+Default=false
+
+[Config pin]
+Label=PIN
+Type=secret
+Help=4 to 12 digits the sender must enter
+
+[Config port]
+Label=Port
+Type=int
+Default=53317
+Min=1024
+Max=65535
+Help=TCP and UDP port; LocalSend devices use 53317
+
+[Config interfaces]
+Label=Network interfaces
+Type=string
+Help=Comma-separated, e.g. wlp7s0; empty picks the LAN automatically (never Docker or VPN)
+
+[Config http_scan]
+Label=Scan the subnet when multicast finds nothing
+Type=bool
+Default=false
+Help=Legacy discovery; probes every address of the own subnet (at most /22)

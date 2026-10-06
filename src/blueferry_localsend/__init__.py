@@ -7,7 +7,7 @@ from __future__ import annotations
 from importlib import resources
 
 PLUGIN_ID = "io.weirdware.blueferry.localsend"
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def manifest_text() -> str:

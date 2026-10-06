@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blueferry-localsend"
-version = "0.1.0"
+version = "0.1.1"
 description = "BlueFerry plugin: send and receive files with LocalSend devices, natively"
 readme = "README.md"
 license = {text = "GPL-2.0-or-later"}

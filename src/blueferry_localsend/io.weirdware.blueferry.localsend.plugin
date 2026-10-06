@@ -1,9 +1,9 @@
 [BlueFerry Plugin]
 Id=io.weirdware.blueferry.localsend
 Name=LocalSend
-Version=0.1.0
+Version=0.1.1
 ApiVersion=1.2
-MinBlueFerry=0.9
+MinBlueFerry=0.8
 Capabilities=card;share;notify;
 Homepage=https://github.com/joshii-h/blueferry-plugin-localsend
 Source=https://github.com/joshii-h/blueferry-plugin-localsend

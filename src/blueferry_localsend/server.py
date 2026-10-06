@@ -154,6 +154,8 @@ class Receiver:
         self, body: bytes, address: str, query: dict[str, str],
     ) -> tuple[int, dict | None]:
         policy = self._policy()
+        if not policy.visible:
+            return 403, None  # hidden means receiving nothing, not only staying quiet
         with self._lock:
             if self._rate_limited(address):
                 return 429, None

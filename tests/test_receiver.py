@@ -162,3 +162,5 @@ def test_hidden_receiver_does_not_answer_discovery(tmp_path) -> None:
     recv = _Recv(tmp_path, visible=False)
     assert recv.receiver.info()[0] == 404
     assert recv.receiver.register(fixture("register.json"), "10.0.0.2")[0] == 404
+    assert recv.prepare({"f1": _offer("f1", "a", b"x")})[0] == 403
+    assert recv.asked == []

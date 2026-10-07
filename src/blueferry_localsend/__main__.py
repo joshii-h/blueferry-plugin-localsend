@@ -10,9 +10,9 @@ import sys
 from pathlib import Path
 
 from blueferry.plugin_api.manifest import ManifestError, default_directories, parse_manifest
+from blueferry_plugin_kit.netaddr import lan_interfaces, parse_interface_list
 
 from blueferry_localsend import PLUGIN_ID, manifest_text
-from blueferry_localsend.netif import lan_interfaces, parse_interface_list
 from blueferry_localsend.settings import SettingsError, SettingsStore
 from blueferry_localsend.tls import IdentityError, load_identity
 

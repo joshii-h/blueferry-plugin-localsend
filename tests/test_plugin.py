@@ -16,13 +16,13 @@ from pathlib import Path
 import pytest
 from blueferry.plugin_api.client import PluginClient
 from blueferry.plugin_api.testing import ServiceTransport, inline_service
+from blueferry_plugin_kit.netaddr import IFF_UP, Interface
 from fakehost import FakeHost, accept_api_1_2
 from helpers import _offer, _request
 
 from blueferry_localsend import PLUGIN_ID, manifest_text
 from blueferry_localsend import __main__ as cli
 from blueferry_localsend.client import Peer, PeerClient, PeerError
-from blueferry_localsend.netif import IFF_UP, Interface
 from blueferry_localsend.protocol import DeviceInfo
 from blueferry_localsend.service import LocalSendService
 from blueferry_localsend.settings import Settings, SettingsStore

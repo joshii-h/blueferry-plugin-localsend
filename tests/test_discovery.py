@@ -5,37 +5,16 @@ import socket
 import struct
 from typing import ClassVar
 
+from blueferry_plugin_kit.netaddr import Interface
 from helpers import fixture
 
 from blueferry_localsend import discovery as discovery_module
 from blueferry_localsend.discovery import DeviceRegistry, UdpMulticast
-from blueferry_localsend.netif import IFF_POINTOPOINT, IFF_UP, Interface, lan_interfaces
 from blueferry_localsend.protocol import (
     DeviceInfo,
 )
 
 # ---- interfaces and multicast (mocked) --------------------------------------
-
-
-def test_only_lan_interfaces_are_used() -> None:
-    p2p = IFF_UP | IFF_POINTOPOINT
-    system = [
-        Interface("lo", "127.0.0.1", "255.0.0.0", IFF_UP | 0x8),
-        Interface("wlp7s0", "192.168.1.95", "255.255.255.0"),
-        Interface("enp0s20f0u9u2", "192.168.1.4", "255.255.255.0"),
-        Interface("enp6s0", "192.168.2.4", "255.255.255.0", 0),            # down
-        Interface("docker0", "172.17.0.1", "255.255.0.0", virtual=True),
-        Interface("br-26254538c1fe", "172.19.0.1", "255.255.0.0", virtual=True),
-        Interface("veth257267f", "169.254.3.3", "255.255.0.0", virtual=True),
-        Interface("Immeditech", "10.10.22.16", "255.255.255.255", p2p, virtual=True),
-        Interface("wg0", "10.8.0.2", "255.255.255.0", p2p, virtual=True),
-        Interface("tun0", "10.9.0.2", "255.255.255.0", p2p, virtual=True),
-    ]
-    names = [i.name for i in lan_interfaces(source=lambda: system)]
-    assert names == ["wlp7s0", "enp0s20f0u9u2"]
-    # A configured list wins, but the deny-list still holds.
-    chosen = lan_interfaces(["enp0s20f0u9u2", "docker0"], source=lambda: system)
-    assert [i.name for i in chosen] == ["enp0s20f0u9u2"]
 
 
 class _FakeSocket:

@@ -29,12 +29,12 @@ from typing import Any
 from blueferry.plugin_api.config import ConfigError
 from blueferry.plugin_api.manifest import PluginManifest
 from blueferry.plugin_api.service import PluginCallError
+from blueferry_plugin_kit.netaddr import Interface, lan_interfaces, parse_interface_list
 
 from blueferry_localsend import files as fs
 from blueferry_localsend.client import Peer, PeerClient, PeerError
 from blueferry_localsend.discovery import Device, DeviceRegistry, MulticastTransport, UdpMulticast
 from blueferry_localsend.i18n import german, t
-from blueferry_localsend.netif import Interface, lan_interfaces, parse_interface_list
 from blueferry_localsend.protocol import (
     API_PREFIX,
     DEFAULT_PORT,

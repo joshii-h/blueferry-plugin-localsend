@@ -12,7 +12,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from blueferry_localsend.netif import Interface
+from blueferry_plugin_kit.netaddr import Interface
+
 from blueferry_localsend.protocol import MAX_DATAGRAM_BYTES, MULTICAST_GROUP, DeviceInfo
 
 log = logging.getLogger(__name__)

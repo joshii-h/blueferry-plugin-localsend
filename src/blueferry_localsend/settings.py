@@ -23,8 +23,8 @@ MAX_FILE_BYTES = 64 * 1024
 MAX_TRUSTED = 64
 
 
-# Owner-only files come from the kit; its error is this module's error.
-SettingsError = SecretsError
+class SettingsError(SecretsError):
+    """Unusable settings; the kit's owner-only file errors arrive as this."""
 
 
 def config_dir() -> Path:
@@ -92,6 +92,10 @@ class SettingsStore:
             text = read_private_text(self.path, MAX_FILE_BYTES)
         except FileNotFoundError:
             return Settings()
+        except SettingsError:
+            raise
+        except SecretsError as error:
+            raise SettingsError(str(error)) from None
         try:
             raw = json.loads(text)
         except ValueError:
@@ -102,7 +106,12 @@ class SettingsStore:
 
     def save(self, settings: Settings) -> None:
         with self._lock:
-            write_private(self.path, json.dumps(asdict(settings), indent=2) + "\n")
+            try:
+                write_private(self.path, json.dumps(asdict(settings), indent=2) + "\n")
+            except SettingsError:
+                raise
+            except SecretsError as error:
+                raise SettingsError(str(error)) from None
 
     def trust(self, fingerprint: str, alias: str) -> Settings:
         settings = self.load()

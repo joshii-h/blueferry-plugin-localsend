@@ -15,8 +15,8 @@ from pathlib import Path
 
 from blueferry_plugin_kit.secrets import SecretsError, check_private, private_dir, write_private
 
-# Owner-only files come from the kit; its error is this module's error.
-IdentityError = SecretsError
+class IdentityError(SecretsError):
+    """The TLS identity is unusable; the kit's file errors arrive as this."""
 
 
 def fingerprint_of(der: bytes) -> str:
@@ -83,6 +83,15 @@ def generate(directory: Path) -> None:
 
 def load_identity(directory: Path) -> Identity:
     """The stored identity, created on first use."""
+    try:
+        return _load_identity(directory)
+    except IdentityError:
+        raise
+    except SecretsError as error:
+        raise IdentityError(str(error)) from None
+
+
+def _load_identity(directory: Path) -> Identity:
     private_dir(directory, "identity directory")
     cert_path, key_path = directory / "cert.pem", directory / "key.pem"
     if not cert_path.exists() or not key_path.exists():

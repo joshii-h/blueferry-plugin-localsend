@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import os
 import ssl
-import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from blueferry_plugin_kit.secrets import SecretsError, check_private, private_dir, write_private
 
-class IdentityError(Exception):
-    pass
+# Owner-only files come from the kit; its error is this module's error.
+IdentityError = SecretsError
 
 
 def fingerprint_of(der: bytes) -> str:
@@ -56,36 +54,6 @@ class Identity:
         return context
 
 
-def _private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise IdentityError("identity directory has the wrong owner or type")
-    path.chmod(0o700)
-
-
-def _write_private(path: Path, data: bytes) -> None:
-    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            descriptor = -1
-            stream.write(data)
-        os.replace(temporary, path)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        Path(temporary).unlink(missing_ok=True)
-
-
-def _check_private(path: Path) -> None:
-    info = os.lstat(path)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise IdentityError(f"{path.name} has the wrong owner or type")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        raise IdentityError(f"{path.name} is readable by other users")
-
-
 def generate(directory: Path) -> None:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -105,22 +73,22 @@ def generate(directory: Path) -> None:
         .not_valid_after(now + datetime.timedelta(days=365 * 30))
         .sign(key, hashes.SHA256())
     )
-    _write_private(directory / "key.pem", key.private_bytes(
+    write_private(directory / "key.pem", key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ))
-    _write_private(directory / "cert.pem", certificate.public_bytes(serialization.Encoding.PEM))
+    write_private(directory / "cert.pem", certificate.public_bytes(serialization.Encoding.PEM))
 
 
 def load_identity(directory: Path) -> Identity:
     """The stored identity, created on first use."""
-    _private_dir(directory)
+    private_dir(directory, "identity directory")
     cert_path, key_path = directory / "cert.pem", directory / "key.pem"
     if not cert_path.exists() or not key_path.exists():
         generate(directory)
-    _check_private(cert_path)
-    _check_private(key_path)
+    check_private(cert_path)
+    check_private(key_path)
     pem = cert_path.read_text(encoding="ascii")
     der = ssl.PEM_cert_to_DER_cert(pem)
     return Identity(cert_path, key_path, fingerprint_of(der))

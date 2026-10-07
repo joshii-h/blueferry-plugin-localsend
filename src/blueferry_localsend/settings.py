@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import socket
-import stat
-import tempfile
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+
+from blueferry_plugin_kit.secrets import SecretsError, read_private_text, write_private
+from blueferry_plugin_kit.secrets import config_dir as plugin_config_dir
 
 from blueferry_localsend import PLUGIN_ID
 from blueferry_localsend.protocol import DEFAULT_PORT
@@ -22,15 +23,12 @@ MAX_FILE_BYTES = 64 * 1024
 MAX_TRUSTED = 64
 
 
-class SettingsError(Exception):
-    pass
+# Owner-only files come from the kit; its error is this module's error.
+SettingsError = SecretsError
 
 
 def config_dir() -> Path:
-    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config"
-    )
-    return Path(config_home) / "blueferry" / "plugins" / PLUGIN_ID
+    return plugin_config_dir(PLUGIN_ID)
 
 
 def default_download_dir() -> Path:
@@ -76,14 +74,6 @@ class Settings:
         return fingerprint.upper() in self.trusted
 
 
-def _private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise SettingsError("config directory has the wrong owner or type")
-    path.chmod(0o700)
-
-
 class SettingsStore:
     def __init__(self, directory: Path | None = None) -> None:
         self.directory = directory or config_dir()
@@ -98,20 +88,10 @@ class SettingsStore:
         return self.directory / "identity"
 
     def load(self) -> Settings:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
-            descriptor = os.open(self.path, flags)
+            text = read_private_text(self.path, MAX_FILE_BYTES)
         except FileNotFoundError:
             return Settings()
-        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-                raise SettingsError("config.json has the wrong owner or type")
-            if stat.S_IMODE(info.st_mode) & 0o077:
-                raise SettingsError("config.json is readable by other users")
-            text = stream.read(MAX_FILE_BYTES + 1)
-        if len(text) > MAX_FILE_BYTES:
-            raise SettingsError("config.json is too large")
         try:
             raw = json.loads(text)
         except ValueError:
@@ -122,19 +102,7 @@ class SettingsStore:
 
     def save(self, settings: Settings) -> None:
         with self._lock:
-            _private_dir(self.directory)
-            descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", dir=self.directory)
-            try:
-                os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    descriptor = -1
-                    json.dump(asdict(settings), stream, indent=2)
-                    stream.write("\n")
-                os.replace(temporary, self.path)
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-                Path(temporary).unlink(missing_ok=True)
+            write_private(self.path, json.dumps(asdict(settings), indent=2) + "\n")
 
     def trust(self, fingerprint: str, alias: str) -> Settings:
         settings = self.load()

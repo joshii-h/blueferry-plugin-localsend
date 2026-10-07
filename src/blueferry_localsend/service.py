@@ -967,7 +967,8 @@ class LocalSendService(SurfacesService):
         if item_id == "devices" and action_id == "search":
             self._last_announce = 0.0
             self.refresh_devices()
-            self.check_devices(0.0)
+            # Probing can take seconds per silent device: not in this call.
+            self._background("search", self.check_devices, 0.0)
             self.emit_card_changed()
             return action_result(True, t("searching"))
         if item_id.startswith("dev-") and action_id == "send":

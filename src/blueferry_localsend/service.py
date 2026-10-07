@@ -1,9 +1,9 @@
 """The plugin process: LocalSend discovery, receiving and sending.
 
 Threads: the GLib main loop (D-Bus), one HTTPS server thread per LAN
-address plus one thread per connection, the multicast reader, and one
-thread per outgoing transfer. D-Bus signals are always emitted through
-``self._to_main``.
+address plus one thread per connection, the multicast reader, a small
+pool answering announcements, and one thread per outgoing transfer. D-Bus
+signals are always emitted through ``self._to_main``.
 """
 from __future__ import annotations
 
@@ -66,6 +66,8 @@ MAX_RECENT = 10
 MAX_PENDING_SHOWN = 2
 MAX_DEVICES_SHOWN = 3
 CARD_SIGNAL_INTERVAL = 1.0
+ANSWER_WORKERS = 4
+MAX_ANSWERS_QUEUED = 16
 _INTERFACE_NAME = re.compile(r"^[A-Za-z0-9_.:@-]{1,15}$")
 _DEVICE_ICONS = {"mobile": "phone", "desktop": "computer", "web": "web-browser",
                  "headless": "utilities-terminal", "server": "network-server"}
@@ -166,6 +168,10 @@ class LocalSendService(SurfacesService):
         self._last_announce = 0.0
         self._last_card_signal = 0.0
         self._card_timer: threading.Timer | None = None
+        # Answers to announcements and checks of registrations: a few
+        # workers, at most one job per source address at a time.
+        self._answers = ThreadPoolExecutor(ANSWER_WORKERS, thread_name_prefix="localsend-answer")
+        self._answering: set[str] = set()
         self.receiver = Receiver(
             me=self.me, policy=self._policy, decide=self._decide,
             on_register=self._on_register, on_change=self._on_session_change,
@@ -289,7 +295,7 @@ class LocalSendService(SurfacesService):
         if self._registry.seen(info, source):
             self._throttled_card_changed()
         if wants_answer and self._settings().visible:
-            self._background(self._answer, info, source)
+            self._background(source, self._answer, info, source)
 
     def _answer(self, info: DeviceInfo, source: str) -> None:
         peer = Peer(source, info.port, info.protocol, info.fingerprint)
@@ -312,7 +318,7 @@ class LocalSendService(SurfacesService):
             self._throttled_card_changed()
         known = self._registry.by_fingerprint(info.fingerprint)
         if info.protocol == "https" and known is not None and not known.verified:
-            self._background(self._verify, info, address)
+            self._background(address, self._verify, info, address)
 
     def _verify(self, info: DeviceInfo, address: str) -> None:
         """Connect back and check the certificate a register claimed."""
@@ -320,8 +326,30 @@ class LocalSendService(SurfacesService):
             if self._registry.seen(info, address, verified=True):
                 self._throttled_card_changed()
 
-    def _background(self, work: Callable[..., None], *args: Any) -> None:
-        threading.Thread(target=work, args=args, name="localsend-answer", daemon=True).start()
+    def _background(self, source: str, work: Callable[..., None], *args: Any) -> bool:
+        """Queue network work for ``source``; dropped while one is pending
+        for it or the queue is full, so a datagram flood costs no threads."""
+        with self._lock:
+            if source in self._answering or len(self._answering) >= MAX_ANSWERS_QUEUED:
+                return False
+            self._answering.add(source)
+
+        def run() -> None:
+            try:
+                work(*args)
+            except Exception:
+                log.exception("answering a device failed")
+            finally:
+                with self._lock:
+                    self._answering.discard(source)
+
+        try:
+            self._answers.submit(run)
+        except RuntimeError:  # shut down
+            with self._lock:
+                self._answering.discard(source)
+            return False
+        return True
 
     def refresh_devices(self) -> None:
         """Announce (if visible) and give peers a moment to answer."""

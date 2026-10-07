@@ -406,3 +406,23 @@ def test_card_changed_is_throttled_but_the_last_change_arrives(tmp_path, plugins
     assert bob_host.card_changed - before <= 1
     bob_host.wait_for(lambda: bob_host.card_changed - before == 2)
     assert len(bob._registry.active()) == 20
+
+
+def test_announcements_are_answered_by_a_bounded_pool(tmp_path, plugins) -> None:
+    bob, _host = plugins("bob")
+    release = threading.Event()
+    started: list[str] = []
+
+    def slow(source: str) -> None:
+        started.append(source)
+        release.wait(5)
+
+    before = threading.active_count()
+    queued = [bob._background("10.0.0.2", slow, "10.0.0.2") for _ in range(50)]
+    assert queued.count(True) == 1           # one job per source at a time
+    queued = [bob._background(f"10.0.1.{n}", slow, f"10.0.1.{n}") for n in range(50)]
+    assert queued.count(True) == 15          # and a bounded queue overall
+    assert threading.active_count() - before <= 4
+    release.set()
+    _wait(lambda: not bob._answering)
+    assert bob._background("10.0.0.2", slow, "10.0.0.2") is True

@@ -11,7 +11,6 @@ so a Docker container or a VPN peer cannot reach it through host routing.
 from __future__ import annotations
 
 import hashlib
-import http.server
 import json
 import logging
 import os
@@ -21,14 +20,19 @@ import ssl
 import threading
 import time
 import urllib.parse
-from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+from blueferry_plugin_kit.lanserver import (
+    ConnectionsPerAddress,
+    DeadlineRequestHandler,
+    HardenedHTTPServer,
+    SlidingWindows,
+)
+
 from blueferry_localsend import files as fs
-from blueferry_localsend.limits import ConnectionsPerAddress, DeadlineReader, deadline_rfile
 from blueferry_localsend.protocol import (
     API_PREFIX,
     MAX_JSON_BYTES,
@@ -97,39 +101,6 @@ class Policy:
     visible: bool = True
 
 
-class Windows:
-    """Sliding time windows of events per peer address (not thread-safe)."""
-
-    def __init__(self, span: float, limit: int, clock: Callable[[], float]) -> None:
-        self._span = span
-        self._limit = limit
-        self._clock = clock
-        self._events: dict[str, deque[float]] = defaultdict(deque)
-
-    def _window(self, address: str, now: float) -> deque[float]:
-        if address not in self._events and len(self._events) >= MAX_TRACKED_ADDRESSES:
-            for key in [k for k, w in self._events.items() if not w or now - w[-1] > self._span]:
-                del self._events[key]
-        window = self._events[address]
-        while window and now - window[0] > self._span:
-            window.popleft()
-        return window
-
-    def full(self, address: str) -> bool:
-        return len(self._window(address, self._clock())) >= self._limit
-
-    def add(self, address: str) -> None:
-        now = self._clock()
-        self._window(address, now).append(now)
-
-    def take(self, address: str) -> bool:
-        """Count one event; False (and not counted) when the window is full."""
-        if self.full(address):
-            return False
-        self.add(address)
-        return True
-
-
 class Receiver:
     """Protocol logic without sockets, so tests can call it directly."""
 
@@ -152,9 +123,12 @@ class Receiver:
         self._lock = threading.Lock()
         self._session: Session | None = None
         self._asking: set[str] = set()
-        self._prepares = Windows(60.0, PREPARE_PER_MINUTE, clock)
-        self._registers = Windows(60.0, REGISTER_PER_MINUTE, clock)
-        self._pin_failures = Windows(PIN_FAILURE_WINDOW, PIN_FAILURES_ALLOWED, clock)
+        tracked = MAX_TRACKED_ADDRESSES
+        self._prepares = SlidingWindows(60.0, PREPARE_PER_MINUTE, clock, max_tracked=tracked)
+        self._registers = SlidingWindows(60.0, REGISTER_PER_MINUTE, clock, max_tracked=tracked)
+        self._pin_failures = SlidingWindows(
+            PIN_FAILURE_WINDOW, PIN_FAILURES_ALLOWED, clock, max_tracked=tracked,
+        )
 
     # ---- helpers ---------------------------------------------------------
 
@@ -394,29 +368,19 @@ def _body(stream: BinaryIO, length: int | None, chunked: bool):
         stream.readline(4)
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+class _Handler(DeadlineRequestHandler):
+    # The kit replaces the socket file so every read respects the request's
+    # remaining time (the wait between keep-alive requests counts too), and
+    # never logs the request line: its query carries the PIN and tokens.
     server_version = "LocalSend"
-    sys_version = ""
     timeout = REQUEST_SOCKET_TIMEOUT
     server: LocalSendServer
-    _deadline: DeadlineReader
 
-    def setup(self) -> None:
-        super().setup()
-        # Replace the plain socket file: every read now respects the
-        # request's remaining time, not only a per-read timeout.
-        self.rfile.close()
-        self._deadline, self.rfile = deadline_rfile(self.connection, REQUEST_SOCKET_TIMEOUT)
-
-    def handle_one_request(self) -> None:
-        self._deadline.start(REQUEST_DEADLINE)
-        super().handle_one_request()
-
-    def log_message(self, format: str, *args) -> None:
-        """Never log the request line: its query carries the PIN and tokens."""
+    def request_deadline(self) -> float:
+        return REQUEST_DEADLINE  # read at runtime, tests shorten it
 
     def log_request(self, code: object = "-", size: object = "-") -> None:
+        # Under this plugin's logger, not the kit's.
         log.debug("http: %s %s", self.command, code)
 
     def _route(self) -> tuple[str, dict[str, str]]:
@@ -457,7 +421,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         address = self.client_address[0]
         receiver = self.server.receiver
         if route == "upload":
-            self._deadline.stream(UPLOAD_GRACE, MIN_UPLOAD_RATE)
+            self.deadline.stream(UPLOAD_GRACE, MIN_UPLOAD_RATE)
             chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
             try:
                 length = None if chunked else int(self.headers.get("Content-Length") or "x")
@@ -488,10 +452,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._reply(404)
 
 
-class LocalSendServer(http.server.ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-    request_queue_size = 16
+class LocalSendServer(HardenedHTTPServer):
+    """Connection caps, the subnet allowlist and the TLS handshake on the
+    connection's own thread come from the kit."""
 
     def __init__(
         self, address: tuple[str, int], receiver: Receiver,
@@ -499,98 +462,11 @@ class LocalSendServer(http.server.ThreadingHTTPServer):
         per_address: ConnectionsPerAddress | None = None,
     ) -> None:
         self.receiver = receiver
-        self._context = context
-        self._allowed = allowed
-        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-        self._per_address = per_address or ConnectionsPerAddress(MAX_CONNECTIONS_PER_ADDRESS)
-        super().__init__(address, _Handler)
+        super().__init__(
+            address, _Handler, context=context, allowed=allowed,
+            max_connections=MAX_CONNECTIONS, max_per_address=MAX_CONNECTIONS_PER_ADDRESS,
+            per_address=per_address,
+        )
 
-    def handle_error(self, request, client_address) -> None:
-        # Peers hang up mid-request (a probe, a cancelled transfer); never
-        # print tracebacks with their addresses.
-        log.debug("connection ended with an error", exc_info=True)
-
-    def verify_request(self, request, client_address) -> bool:
-        return self._allowed(client_address[0])
-
-    def process_request(self, request, client_address) -> None:
-        if not self._slots.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
-        if not self._per_address.acquire(client_address[0]):
-            self._slots.release()
-            self.shutdown_request(request)
-            return
-        try:
-            super().process_request(request, client_address)
-        except Exception:
-            self._release(client_address)
-            raise
-
-    def _release(self, client_address) -> None:
-        self._per_address.release(client_address[0])
-        self._slots.release()
-
-    def process_request_thread(self, request, client_address) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._release(client_address)
-
-    def finish_request(self, request, client_address) -> None:
-        # The TLS handshake runs here, on the connection's own thread, so a
-        # slow client never holds up accept(). The socket timeout bounds the
-        # whole handshake (CPython counts it as one deadline), not each read.
-        request.settimeout(REQUEST_DEADLINE)
-        if self._context is not None:
-            try:
-                request = self._context.wrap_socket(request, server_side=True)
-            except (OSError, ssl.SSLError):
-                return
-        super().finish_request(request, client_address)
-
-
-class ServerGroup:
-    """One server per bound address, each on its own thread."""
-
-    def __init__(self) -> None:
-        self.servers: list[LocalSendServer] = []
-        self._threads: list[threading.Thread] = []
-        # Shared, so a client cannot multiply its share by using every address.
-        self._per_address = ConnectionsPerAddress(MAX_CONNECTIONS_PER_ADDRESS)
-
-    def start(
-        self, addresses: list[str], port: int, receiver: Receiver,
-        context: ssl.SSLContext | None, allowed: Callable[[str], bool],
-    ) -> list[str]:
-        self.stop()
-        failed = []
-        for address in addresses:
-            try:
-                server = LocalSendServer(
-                    (address, port), receiver, context, allowed, self._per_address,
-                )
-            except OSError as error:
-                log.warning("cannot listen on %s:%d: %s", address, port, error.strerror)
-                failed.append(address)
-                continue
-            thread = threading.Thread(
-                target=server.serve_forever, kwargs={"poll_interval": 0.5},
-                name=f"localsend-http-{address}", daemon=True,
-            )
-            thread.start()
-            self.servers.append(server)
-            self._threads.append(thread)
-        return failed
-
-    @property
-    def ports(self) -> list[int]:
-        return [server.server_address[1] for server in self.servers]
-
-    def stop(self) -> None:
-        for server in self.servers:
-            server.shutdown()
-            server.server_close()
-        for thread in self._threads:
-            thread.join(timeout=2)
-        self.servers, self._threads = [], []
+    def handshake_timeout(self) -> float:
+        return REQUEST_DEADLINE  # read at runtime, tests shorten it

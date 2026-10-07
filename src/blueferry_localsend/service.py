@@ -29,6 +29,7 @@ from typing import Any
 from blueferry.plugin_api.config import ConfigError
 from blueferry.plugin_api.manifest import PluginManifest
 from blueferry.plugin_api.service import PluginCallError
+from blueferry_plugin_kit.lanserver import ServerGroup
 from blueferry_plugin_kit.netaddr import Interface, lan_interfaces, parse_interface_list
 
 from blueferry_localsend import files as fs
@@ -46,7 +47,13 @@ from blueferry_localsend.protocol import (
     parse_announcement,
     parse_device,
 )
-from blueferry_localsend.server import Policy, Receiver, ServerGroup, Session
+from blueferry_localsend.server import (
+    MAX_CONNECTIONS_PER_ADDRESS,
+    LocalSendServer,
+    Policy,
+    Receiver,
+    Session,
+)
 from blueferry_localsend.settings import Settings, SettingsError, SettingsStore
 from blueferry_localsend.surfaces import (
     Action,
@@ -158,7 +165,9 @@ class LocalSendService(SurfacesService):
         self._identity: Identity | None = None
         self._client: PeerClient | None = None
         self._registry = DeviceRegistry()
-        self._servers = ServerGroup()
+        # The per-address cap is shared by all servers, so a client cannot
+        # multiply its share by using every address.
+        self._servers = ServerGroup(MAX_CONNECTIONS_PER_ADDRESS, name="localsend-http")
         self._active_interfaces: list[Interface] = []
         self._problem = ""
         self._pending: dict[str, Pending] = {}
@@ -218,8 +227,12 @@ class LocalSendService(SurfacesService):
             log.warning("no LAN interface to use")
             return
         addresses = list(dict.fromkeys(i.address for i in interfaces))
+        context = identity.server_context()
         failed = self._servers.start(
-            addresses, port, self.receiver, identity.server_context(), self.allowed,
+            addresses, port,
+            lambda address, per_address: LocalSendServer(
+                address, self.receiver, context, self.allowed, per_address,
+            ),
         )
         self._problem = f"port {port} busy on " + ", ".join(failed) if failed else ""
         try:

@@ -8,7 +8,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -18,8 +18,15 @@ from blueferry_localsend.protocol import MAX_DATAGRAM_BYTES, MULTICAST_GROUP, De
 
 log = logging.getLogger(__name__)
 
-DEVICE_TTL = 15 * 60  # forget devices not heard of for this long
+# Forget a device after this long without any contact. LocalSend apps
+# announce only when they start or refresh, so the service probes the
+# devices it knows (see LocalSendService.check_devices); a device that
+# answers stays, one that stopped answering (an iPhone that put LocalSend
+# to sleep, a closed app) is gone after this.
+DEVICE_TTL = 3 * 60
 MAX_DEVICES = 32
+# How often the own addresses are read again (interfaces come and go).
+OWN_ADDRESSES_TTL = 30.0
 
 OnDatagram = Callable[[bytes, str], None]
 
@@ -131,6 +138,8 @@ class Device:
     address: str
     last_seen: float
     verified: bool = False
+    # False after a probe found nobody answering at ``address``.
+    reachable: bool = True
 
     @property
     def target_id(self) -> str:
@@ -143,11 +152,34 @@ def target_id_for(fingerprint: str) -> str:
 
 
 class DeviceRegistry:
-    def __init__(self, own_fingerprint: str = "", clock: Callable[[], float] = time.time) -> None:
+    """The devices seen on the LAN, never this computer itself.
+
+    Besides this plugin's own fingerprint, everything that comes from one of
+    this computer's addresses is ignored: another LocalSend on this machine
+    (the app, started once) would otherwise show up as a device.
+    """
+
+    def __init__(
+        self, own_fingerprint: str = "", clock: Callable[[], float] = time.time,
+        own_addresses: Callable[[], Iterable[str]] = lambda: (),
+    ) -> None:
         self.own_fingerprint = own_fingerprint.upper()
         self._clock = clock
+        self._own_addresses = own_addresses
+        self._own: frozenset[str] = frozenset()
+        self._own_read = float("-inf")
         self._lock = threading.Lock()
         self._devices: dict[str, Device] = {}
+
+    def is_own_address(self, address: str) -> bool:
+        now = time.monotonic()
+        if now - self._own_read > OWN_ADDRESSES_TTL:
+            try:
+                self._own = frozenset(self._own_addresses())
+            except OSError:
+                self._own = frozenset()
+            self._own_read = now
+        return address in self._own
 
     def seen(self, info: DeviceInfo, address: str, *, verified: bool = False) -> bool:
         """Record a device; True when it is new or its details changed.
@@ -162,14 +194,15 @@ class DeviceRegistry:
         except ValueError:
             return False
         key = info.fingerprint.upper()
-        if key == self.own_fingerprint:
+        if key == self.own_fingerprint or self.is_own_address(address):
             return False
         now = self._clock()
         with self._lock:
             previous = self._devices.get(key)
             if previous is not None and previous.verified and not verified:
                 if previous.address == address and previous.info == info:
-                    self._devices[key] = replace(previous, last_seen=now)
+                    self._devices[key] = replace(previous, last_seen=now, reachable=True)
+                    return not previous.reachable
                 return False
             if previous is None and len(self._devices) >= MAX_DEVICES and not self._evict(
                 verified,
@@ -178,8 +211,37 @@ class DeviceRegistry:
             self._devices[key] = Device(info, address, now, verified)
         return (
             previous is None or previous.info != info or previous.address != address
-            or previous.verified != verified
+            or previous.verified != verified or not previous.reachable
         )
+
+    def answered(self, fingerprint: str, address: str, *, verified: bool) -> bool:
+        """A probe reached the device at ``address``; True if that changed it.
+
+        ``verified``: the connection was HTTPS and the certificate matched.
+        Only refreshes an entry still at that address.
+        """
+        with self._lock:
+            device = self._devices.get(fingerprint.upper())
+            if device is None or device.address != address:
+                return False
+            updated = replace(device, last_seen=self._clock(), reachable=True,
+                              verified=device.verified or verified)
+            self._devices[fingerprint.upper()] = updated
+        return updated.verified != device.verified or not device.reachable
+
+    def unreachable(self, fingerprint: str, address: str) -> bool:
+        """A probe found nobody; True if that changed the entry."""
+        with self._lock:
+            device = self._devices.get(fingerprint.upper())
+            if device is None or device.address != address or not device.reachable:
+                return False
+            self._devices[fingerprint.upper()] = replace(device, reachable=False)
+        return True
+
+    def quiet_since(self, seconds: float) -> list[Device]:
+        """Devices without contact for at least ``seconds`` (to probe)."""
+        now = self._clock()
+        return [d for d in self.active() if now - d.last_seen >= seconds]
 
     def _evict(self, for_verified: bool) -> bool:
         """Make room for one entry. Caller holds the lock.
@@ -195,12 +257,22 @@ class DeviceRegistry:
         self._devices.pop(oldest.info.fingerprint.upper(), None)
         return True
 
-    def active(self) -> list[Device]:
+    def expire(self) -> bool:
+        """Drop devices without contact for DEVICE_TTL; True if any went."""
         now = self._clock()
         with self._lock:
-            for key in [k for k, d in self._devices.items() if now - d.last_seen > DEVICE_TTL]:
+            gone = [k for k, d in self._devices.items()
+                    if now - d.last_seen > DEVICE_TTL or self.is_own_address(d.address)]
+            for key in gone:
                 del self._devices[key]
-            return sorted(self._devices.values(), key=lambda d: -d.last_seen)
+        return bool(gone)
+
+    def active(self) -> list[Device]:
+        """Known devices, reachable ones first, newest contact first."""
+        self.expire()
+        with self._lock:
+            return sorted(self._devices.values(),
+                          key=lambda d: (not d.reachable, -d.last_seen))
 
     def by_target(self, target_id: str) -> Device | None:
         return next((d for d in self.active() if d.target_id == target_id), None)

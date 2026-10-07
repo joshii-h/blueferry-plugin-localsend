@@ -107,3 +107,41 @@ def test_unverified_claims_never_replace_or_evict_verified_devices() -> None:
         registry.seen(DeviceInfo(alias="x", fingerprint=f"F{number}"), "192.168.1.9")
     assert registry.by_fingerprint("AB12") is not None
     assert len(registry.active()) == discovery_module.MAX_DEVICES
+
+
+def test_registry_ignores_this_computers_own_addresses() -> None:
+    own = {"192.168.1.95"}
+    registry = DeviceRegistry("ME", own_addresses=lambda: own)
+    app_here = DeviceInfo(alias="Solid Pear", fingerprint="FLATPAK")
+    assert registry.seen(app_here, "192.168.1.95") is False
+    assert registry.active() == []
+    phone = DeviceInfo(alias="iPhone", fingerprint="AB12")
+    assert registry.seen(phone, "192.168.1.3") is True
+    broken = DeviceRegistry("ME", own_addresses=lambda: (_ for _ in ()).throw(OSError()))
+    assert broken.seen(phone, "192.168.1.3") is True
+
+
+def test_probes_mark_devices_reachable_verified_or_gone() -> None:
+    now = [1000.0]
+    registry = DeviceRegistry("ME", clock=lambda: now[0])
+    phone = DeviceInfo(alias="iPhone", fingerprint="AB12")
+    registry.seen(phone, "192.168.1.3")
+    assert registry.quiet_since(20) == []
+    now[0] += 30
+    assert [d.info.alias for d in registry.quiet_since(20)] == ["iPhone"]
+    assert registry.answered("ab12", "192.168.1.9", verified=True) is False  # other address
+    assert registry.answered("ab12", "192.168.1.3", verified=True) is True
+    assert registry.by_fingerprint("AB12").verified
+    assert registry.answered("ab12", "192.168.1.3", verified=False) is False
+    assert registry.by_fingerprint("AB12").verified  # a later plain answer keeps it
+    now[0] += 30
+    assert registry.unreachable("AB12", "192.168.1.3") is True
+    assert registry.unreachable("AB12", "192.168.1.3") is False
+    tablet = DeviceInfo(alias="iPad", fingerprint="CD34")
+    registry.seen(tablet, "192.168.1.4")
+    assert [d.info.alias for d in registry.active()] == ["iPad", "iPhone"]  # reachable first
+    # Hearing from it again makes it reachable; the change is reported.
+    assert registry.seen(phone, "192.168.1.3") is True  # back: a change for the card
+    assert registry.by_fingerprint("AB12").reachable
+    now[0] += discovery_module.DEVICE_TTL + 1
+    assert registry.expire() is True and registry.active() == []

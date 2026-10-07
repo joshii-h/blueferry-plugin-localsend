@@ -395,3 +395,14 @@ def test_all_surfaces_live_on_plugin1() -> None:
             "Notify", "GetInfo", "Status"} <= members
     assert table[PLUGIN_INTERFACE]["SendFiles"]._dbus_in_signature == "sas"
     assert table[PLUGIN_INTERFACE]["Notify"]._dbus_signature == "sssss"
+
+
+def test_card_changed_is_throttled_but_the_last_change_arrives(tmp_path, plugins) -> None:
+    bob, bob_host = plugins("bob")
+    before = bob_host.card_changed
+    for number in range(20):
+        bob._on_register(DeviceInfo(alias=f"d{number}", fingerprint=f"F{number}",
+                                    protocol="http"), "127.0.0.1")
+    assert bob_host.card_changed - before <= 1
+    bob_host.wait_for(lambda: bob_host.card_changed - before == 2)
+    assert len(bob._registry.active()) == 20

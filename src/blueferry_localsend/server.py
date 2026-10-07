@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 
 SESSION_IDLE_TIMEOUT = 120.0
 PREPARE_PER_MINUTE = 10
+REGISTER_PER_MINUTE = 20
 PIN_FAILURES_ALLOWED = 5
 PIN_FAILURE_WINDOW = 600.0
 MAX_TRACKED_ADDRESSES = 1024
@@ -143,6 +144,7 @@ class Receiver:
         self._session: Session | None = None
         self._asking: set[str] = set()
         self._prepares = Windows(60.0, PREPARE_PER_MINUTE, clock)
+        self._registers = Windows(60.0, REGISTER_PER_MINUTE, clock)
         self._pin_failures = Windows(PIN_FAILURE_WINDOW, PIN_FAILURES_ALLOWED, clock)
 
     # ---- helpers ---------------------------------------------------------
@@ -170,6 +172,9 @@ class Receiver:
     def register(self, body: bytes, address: str) -> tuple[int, dict | None]:
         if not self._policy().visible:
             return 404, None
+        with self._lock:
+            if not self._registers.take(address):
+                return 429, None
         try:
             info = parse_device(loads(body))
         except ProtocolError:

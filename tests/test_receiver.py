@@ -181,3 +181,14 @@ def test_hidden_receiver_does_not_answer_discovery(tmp_path) -> None:
     assert recv.receiver.register(fixture("register.json"), "10.0.0.2")[0] == 404
     assert recv.prepare({"f1": _offer("f1", "a", b"x")})[0] == 403
     assert recv.asked == []
+
+
+def test_register_is_rate_limited_per_address(tmp_path) -> None:
+    now = [1000.0]
+    recv = _Recv(tmp_path, clock=lambda: now[0])
+    body = fixture("register.json")
+    statuses = [recv.receiver.register(body, "10.0.0.2")[0] for _ in range(22)]
+    assert statuses[:20] == [200] * 20 and statuses[20:] == [429, 429]
+    assert recv.receiver.register(body, "10.0.0.3")[0] == 200
+    now[0] += 61
+    assert recv.receiver.register(body, "10.0.0.2")[0] == 200

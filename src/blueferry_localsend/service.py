@@ -65,6 +65,7 @@ DISCOVERY_WAIT = 1.0
 MAX_RECENT = 10
 MAX_PENDING_SHOWN = 2
 MAX_DEVICES_SHOWN = 3
+CARD_SIGNAL_INTERVAL = 1.0
 _INTERFACE_NAME = re.compile(r"^[A-Za-z0-9_.:@-]{1,15}$")
 _DEVICE_ICONS = {"mobile": "phone", "desktop": "computer", "web": "web-browser",
                  "headless": "utilities-terminal", "server": "network-server"}
@@ -164,6 +165,7 @@ class LocalSendService(SurfacesService):
         self._recorded: set[str] = set()
         self._last_announce = 0.0
         self._last_card_signal = 0.0
+        self._card_timer: threading.Timer | None = None
         self.receiver = Receiver(
             me=self.me, policy=self._policy, decide=self._decide,
             on_register=self._on_register, on_change=self._on_session_change,
@@ -285,7 +287,7 @@ class LocalSendService(SurfacesService):
         if info.fingerprint.upper() == self.identity().fingerprint.upper():
             return
         if self._registry.seen(info, source):
-            self.emit_card_changed()
+            self._throttled_card_changed()
         if wants_answer and self._settings().visible:
             self._background(self._answer, info, source)
 
@@ -303,11 +305,11 @@ class LocalSendService(SurfacesService):
         verified = peer.protocol == "https"
         if self._registry.seen(replace(answer, fingerprint=info.fingerprint), source,
                                verified=verified):
-            self.emit_card_changed()
+            self._throttled_card_changed()
 
     def _on_register(self, info: DeviceInfo, address: str) -> None:
         if self._registry.seen(info, address):
-            self.emit_card_changed()
+            self._throttled_card_changed()
         known = self._registry.by_fingerprint(info.fingerprint)
         if info.protocol == "https" and known is not None and not known.verified:
             self._background(self._verify, info, address)
@@ -316,7 +318,7 @@ class LocalSendService(SurfacesService):
         """Connect back and check the certificate a register claimed."""
         if self.peer_client.verify_peer(Peer(address, info.port, "https", info.fingerprint)):
             if self._registry.seen(info, address, verified=True):
-                self.emit_card_changed()
+                self._throttled_card_changed()
 
     def _background(self, work: Callable[..., None], *args: Any) -> None:
         threading.Thread(target=work, args=args, name="localsend-answer", daemon=True).start()
@@ -451,10 +453,25 @@ class LocalSendService(SurfacesService):
         self._throttled_card_changed()
 
     def _throttled_card_changed(self) -> None:
-        now = time.monotonic()
-        if now - self._last_card_signal >= 1.0:
+        """At most one CardChanged per second; a change inside that second
+        is sent when it ends, so the last state always arrives."""
+        with self._lock:
+            now = time.monotonic()
+            wait = self._last_card_signal + CARD_SIGNAL_INTERVAL - now
+            if wait > 0:
+                if self._card_timer is None:
+                    self._card_timer = threading.Timer(wait, self._trailing_card_changed)
+                    self._card_timer.daemon = True
+                    self._card_timer.start()
+                return
             self._last_card_signal = now
-            self.emit_card_changed()
+        self.emit_card_changed()
+
+    def _trailing_card_changed(self) -> None:
+        with self._lock:
+            self._card_timer = None
+            self._last_card_signal = time.monotonic()
+        self.emit_card_changed()
 
     # ---- sending ---------------------------------------------------------
 

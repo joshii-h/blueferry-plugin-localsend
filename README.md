@@ -114,8 +114,9 @@ trusted devices.
   to a free name (`photo (1).jpg`), never over an existing file. The size
   announced per file is enforced while receiving, a SHA-256 sent along is
   verified, and the total is limited by `max_size_mb` and free disk space.
-- **Limits.** One session at a time, ten requests per minute per address,
-  32 connections, timeouts on every socket.
+- **Limits.** One session at a time, ten upload requests and twenty
+  registrations per minute per address, 32 connections, timeouts on every
+  socket. Card updates caused by discovery are sent at most once a second.
 - **Secrets.** The private key and the settings (including the PIN) are in
   owner-only files below
   `~/.config/blueferry/plugins/io.weirdware.blueferry.localsend/`. Logs never

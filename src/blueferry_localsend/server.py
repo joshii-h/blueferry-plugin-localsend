@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 
 SESSION_IDLE_TIMEOUT = 120.0
 PREPARE_PER_MINUTE = 10
+PIN_FAILURES_ALLOWED = 5
+PIN_FAILURE_WINDOW = 600.0
+MAX_TRACKED_ADDRESSES = 1024
 MAX_CONNECTIONS = 32
 DISK_RESERVE = 100 * 1024 * 1024
 READ_CHUNK = 256 * 1024
@@ -84,6 +87,39 @@ class Policy:
     visible: bool = True
 
 
+class Windows:
+    """Sliding time windows of events per peer address (not thread-safe)."""
+
+    def __init__(self, span: float, limit: int, clock: Callable[[], float]) -> None:
+        self._span = span
+        self._limit = limit
+        self._clock = clock
+        self._events: dict[str, deque[float]] = defaultdict(deque)
+
+    def _window(self, address: str, now: float) -> deque[float]:
+        if address not in self._events and len(self._events) >= MAX_TRACKED_ADDRESSES:
+            for key in [k for k, w in self._events.items() if not w or now - w[-1] > self._span]:
+                del self._events[key]
+        window = self._events[address]
+        while window and now - window[0] > self._span:
+            window.popleft()
+        return window
+
+    def full(self, address: str) -> bool:
+        return len(self._window(address, self._clock())) >= self._limit
+
+    def add(self, address: str) -> None:
+        now = self._clock()
+        self._window(address, now).append(now)
+
+    def take(self, address: str) -> bool:
+        """Count one event; False (and not counted) when the window is full."""
+        if self.full(address):
+            return False
+        self.add(address)
+        return True
+
+
 class Receiver:
     """Protocol logic without sockets, so tests can call it directly."""
 
@@ -106,7 +142,8 @@ class Receiver:
         self._lock = threading.Lock()
         self._session: Session | None = None
         self._asking: set[str] = set()
-        self._prepares: dict[str, deque[float]] = defaultdict(deque)
+        self._prepares = Windows(60.0, PREPARE_PER_MINUTE, clock)
+        self._pin_failures = Windows(PIN_FAILURE_WINDOW, PIN_FAILURES_ALLOWED, clock)
 
     # ---- helpers ---------------------------------------------------------
 
@@ -122,16 +159,6 @@ class Receiver:
             self._session = None
             return None
         return session
-
-    def _rate_limited(self, address: str) -> bool:
-        now = self._clock()
-        window = self._prepares[address]
-        while window and now - window[0] > 60:
-            window.popleft()
-        if len(window) >= PREPARE_PER_MINUTE:
-            return True
-        window.append(now)
-        return False
 
     # ---- routes ----------------------------------------------------------
 
@@ -157,12 +184,18 @@ class Receiver:
         if not policy.visible:
             return 403, None  # hidden means receiving nothing, not only staying quiet
         with self._lock:
-            if self._rate_limited(address):
+            # Five wrong PINs lock the address out for ten minutes.
+            if self._pin_failures.full(address) or not self._prepares.take(address):
                 return 429, None
-        if policy.pin and not secrets.compare_digest(
-            query.get("pin", "").encode(), policy.pin.encode(),
-        ):
-            return 401, None
+        if policy.pin:
+            given = query.get("pin", "")
+            if not secrets.compare_digest(given.encode(), policy.pin.encode()):
+                if given:
+                    # The first attempt without a PIN is how a sender learns
+                    # that one is needed; only actual guesses count.
+                    with self._lock:
+                        self._pin_failures.add(address)
+                return 401, None
         try:
             request = parse_prepare_upload(body)
         except ProtocolError as error:

@@ -71,7 +71,7 @@ def test_human_sizes() -> None:
 
 class _Recv:
     def __init__(self, tmp_path: Path, *, accept: bool = True, max_bytes: int = 10_000,
-                 pin: str = "", visible: bool = True) -> None:
+                 pin: str = "", visible: bool = True, clock=None) -> None:
         self.root = tmp_path / "inbox"
         self.asked: list = []
         self.changes = 0
@@ -81,6 +81,7 @@ class _Recv:
             decide=lambda request, address: self.asked.append(request) or accept,
             on_register=lambda info, address: None,
             on_change=lambda session: setattr(self, "changes", self.changes + 1),
+            **({"clock": clock} if clock else {}),
         )
 
     def prepare(self, files: dict, address: str = "10.0.0.2", query: dict | None = None):
@@ -140,6 +141,22 @@ def test_checksum_token_address_and_pin_are_enforced(tmp_path) -> None:
     files = {"f1": _offer("f1", "a.txt", b"abc")}
     assert pinned.prepare(files)[0] == 401
     assert pinned.prepare(files, query={"pin": "1234"})[0] == 401
+    assert pinned.prepare(files, query={"pin": "4711"})[0] == 200
+
+
+def test_wrong_pins_lock_the_address_out_for_ten_minutes(tmp_path) -> None:
+    now = [1000.0]
+    pinned = _Recv(tmp_path, pin="4711", clock=lambda: now[0])
+    files = {"f1": _offer("f1", "a.txt", b"abc")}
+    assert pinned.prepare(files)[0] == 401          # no PIN yet: not a guess
+    for guess in range(5):
+        now[0] += 30
+        assert pinned.prepare(files, query={"pin": f"000{guess}"})[0] == 401
+    now[0] += 30
+    assert pinned.prepare(files, query={"pin": "4711"})[0] == 429
+    assert pinned.prepare(files, address="10.0.0.3", query={"pin": "4711"})[0] == 200
+    pinned.receiver.cancel({"sessionId": pinned.receiver.active.id}, "10.0.0.3")
+    now[0] += 600
     assert pinned.prepare(files, query={"pin": "4711"})[0] == 200
 
 

@@ -121,7 +121,8 @@ trusted devices.
   `~/.config/blueferry/plugins/io.weirdware.blueferry.localsend/`. Logs never
   contain file names, device names or addresses of transfers.
 - The PIN is checked over TLS but is a convenience, not strong
-  authentication: a LAN attacker can try PINs (rate-limited) or watch you type.
+  authentication: a LAN attacker can watch you type. Five wrong PINs lock the
+  sender's address out for ten minutes.
 
 ## Develop
 

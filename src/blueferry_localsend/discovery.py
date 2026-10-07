@@ -238,6 +238,15 @@ class DeviceRegistry:
             self._devices[fingerprint.upper()] = replace(device, reachable=False)
         return True
 
+    def forget(self, fingerprint: str, address: str) -> bool:
+        """Drop the entry if it is still at ``address``; True if it was."""
+        with self._lock:
+            device = self._devices.get(fingerprint.upper())
+            if device is None or device.address != address:
+                return False
+            del self._devices[fingerprint.upper()]
+        return True
+
     def quiet_since(self, seconds: float) -> list[Device]:
         """Devices without contact for at least ``seconds`` (to probe)."""
         now = self._clock()

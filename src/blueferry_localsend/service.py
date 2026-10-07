@@ -129,6 +129,7 @@ class Message:
     sender: str
     text: str
     when: float
+    fingerprint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,9 +191,12 @@ def _system_interfaces(names: list[str]) -> list[Interface]:
 
 
 def _is_web_link(text: str) -> bool:
+    """A bare http(s) link the core will open (no user:password@)."""
     stripped = text.strip()
-    return (len(stripped) <= 2048 and " " not in stripped and "\n" not in stripped
-            and re.match(r"^https?://[^\s/]+", stripped) is not None)
+    if len(stripped) > 2048 or any(ch.isspace() for ch in stripped):
+        return False
+    match = re.match(r"^https?://([^/?#]+)", stripped)
+    return match is not None and "@" not in match.group(1)
 
 
 class LocalSendService(SurfacesService):
@@ -228,8 +232,12 @@ class LocalSendService(SurfacesService):
         self._probe_interval = probe_interval
         self._autostart_home = autostart_home
         self._watcher: threading.Thread | None = None
-        self._stopping = threading.Event()
+        self._stopping = threading.Event()  # replaced for every new watcher
         self._lock = threading.RLock()
+        # Binding and unbinding the servers: start/stop, Retry, the watcher.
+        # Not self._lock: server threads take that in allowed() while
+        # ServerGroup.stop() joins them.
+        self._bind_lock = threading.RLock()
         self._identity: Identity | None = None
         self._client: PeerClient | None = None
         self._registry = DeviceRegistry(own_addresses=own_addresses)
@@ -285,6 +293,10 @@ class LocalSendService(SurfacesService):
 
     def start(self) -> None:
         """Bind the servers and join multicast on the LAN interfaces."""
+        with self._bind_lock:
+            self._start()
+
+    def _start(self) -> None:
         settings = self._settings()
         try:
             identity = self.identity()
@@ -329,33 +341,39 @@ class LocalSendService(SurfacesService):
 
     def rebind(self) -> bool:
         """Try the port again (another LocalSend may have quit); True if bound."""
-        with self._lock:
-            interfaces = list(self._active_interfaces)
-        if not interfaces or self._identity is None:
-            return False
-        settings = self._settings()
-        port = settings.port if self._port_override is None else self._port_override
-        self._servers.stop()
-        self._bind(self._identity, interfaces, port)
-        if not self._port_busy:
+        with self._bind_lock:
+            with self._lock:
+                interfaces = list(self._active_interfaces)
+            if not interfaces or self._identity is None:
+                return False
+            settings = self._settings()
+            port = settings.port if self._port_override is None else self._port_override
+            self._servers.stop()
+            self._bind(self._identity, interfaces, port)
+            bound = not self._port_busy
+        if bound:
             log.info("port free again; receiving")
+            if settings.visible:
+                self.announce()  # peers see this computer again
             self.emit_card_changed()
-        return not self._port_busy
+        return bound
 
     # ---- watching the devices --------------------------------------------
 
     def _start_watcher(self) -> None:
         if self._probe_interval is None or (self._watcher and self._watcher.is_alive()):
             return
-        self._stopping.clear()
+        # Each watcher has its own event: one that outlived stop() (a probe
+        # round can take longer than the join) never wakes up again.
+        self._stopping = threading.Event()
         self._watcher = threading.Thread(
-            target=self._watch, name="localsend-watch", daemon=True,
+            target=self._watch, args=(self._stopping,), name="localsend-watch", daemon=True,
         )
         self._watcher.start()
 
-    def _watch(self) -> None:
+    def _watch(self, stopping: threading.Event) -> None:
         interval = float(self._probe_interval or PROBE_INTERVAL)
-        while not self._stopping.wait(interval):
+        while not stopping.wait(interval):
             try:
                 self.check_devices(interval)
             except Exception:  # the watcher must survive one bad round
@@ -368,7 +386,9 @@ class LocalSendService(SurfacesService):
         A probe is a TLS connection that checks the announced certificate
         (over HTTPS), so it also verifies devices that only announced.
         """
-        if self._port_busy:
+        # Only while nothing is bound: a partial bind keeps serving (and its
+        # transfers); Retry on the card rebinds everything.
+        if self._port_busy and not self._servers.servers:
             self.rebind()
         changed = self._registry.expire()
         quiet = self._registry.quiet_since(quiet_for)
@@ -382,9 +402,14 @@ class LocalSendService(SurfacesService):
     def _probe_device(self, device: Device) -> bool:
         info = device.info
         peer = Peer(device.address, info.port, info.protocol, info.fingerprint)
-        if self.peer_client.verify_peer(peer):
+        problem = self.peer_client.probe(peer)
+        if problem is None:
             return self._registry.answered(info.fingerprint, device.address,
                                            verified=info.protocol == "https")
+        if problem == "fingerprint":
+            # Someone else answers there now: the entry proves nothing any more.
+            log.info("a device's certificate no longer matches; forgotten")
+            return self._registry.forget(info.fingerprint, device.address)
         return self._registry.unreachable(info.fingerprint, device.address)
 
     def stop(self) -> None:
@@ -393,7 +418,8 @@ class LocalSendService(SurfacesService):
             self._watcher.join(timeout=2)
         self._watcher = None
         self._multicast.stop()
-        self._servers.stop()
+        with self._bind_lock:
+            self._servers.stop()
         for pending in list(self._pending.values()):
             pending.event.set()
         for job in list(self._jobs.values()):
@@ -632,7 +658,8 @@ class LocalSendService(SurfacesService):
         """A text from LocalSend's "Text": keep it for the card, pop up."""
         text = request.message or ""
         self._registry.seen(request.info, address)
-        message = Message(secrets.token_hex(6), request.info.alias, text, time.time())
+        message = Message(secrets.token_hex(6), request.info.alias, text, time.time(),
+                          request.info.fingerprint)
         with self._lock:
             self._messages.appendleft(message)
         log.info("message received (%d characters)", len(text))
@@ -640,6 +667,12 @@ class LocalSendService(SurfacesService):
         self.emit_notify(t("localsend"), t("message_from", name=request.info.alias),
                          "mail-message-new", t("copy"), f"copy-{message.id}")
         self.emit_card_changed()
+
+    def _link_allowed(self, message: Message) -> bool:
+        """"Open link" only for a bare web link from a verified device:
+        anyone on the LAN can send a text, not everyone gets a button."""
+        sender = self._registry.by_fingerprint(message.fingerprint)
+        return _is_web_link(message.text) and sender is not None and sender.verified
 
     def _message(self, message_id: str) -> Message | None:
         with self._lock:
@@ -841,7 +874,7 @@ class LocalSendService(SurfacesService):
             ))
         for message in messages[:1]:
             actions = [Action("copy", t("copy"), "edit-copy", "primary")]
-            if _is_web_link(message.text):
+            if self._link_allowed(message):
                 actions.append(Action("open", t("open_link"), "internet-web-browser"))
             actions.append(Action("dismiss", t("dismiss"), "window-close"))
             items.append(CardItem(
@@ -965,10 +998,16 @@ class LocalSendService(SurfacesService):
                 return action_result(True, t("retried"))
             return action_result(False, t("still_busy", port=self.port))
         if item_id == "devices" and action_id == "search":
-            self._last_announce = 0.0
-            self.refresh_devices()
-            # Probing can take seconds per silent device: not in this call.
-            self._background("search", self.check_devices, 0.0)
+            if self._settings().visible:
+                self.announce()
+
+            def search() -> None:
+                # A subnet scan and probing silent devices take seconds:
+                # not inside this call.
+                self.refresh_devices()
+                self.check_devices(0.0)
+
+            self._background("search", search)
             self.emit_card_changed()
             return action_result(True, t("searching"))
         if item_id.startswith("dev-") and action_id == "send":
@@ -987,7 +1026,7 @@ class LocalSendService(SurfacesService):
             return action_result(False, t("gone"))
         if action_id == "copy":
             return self._copy_message(message_id)
-        if action_id == "open" and _is_web_link(message.text):
+        if action_id == "open" and self._link_allowed(message):
             # The core opens http(s) links in the browser.
             return action_result(True, None, message.text.strip())
         if action_id == "dismiss":

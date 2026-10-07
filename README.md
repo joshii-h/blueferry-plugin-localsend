@@ -36,7 +36,8 @@ repository).
   with *Cancel*, and *Open folder* opens the file manager with the received
   files selected.
 - **Texts and links.** LocalSend's "Text" arrives as a message on the card
-  with *Copy* (and *Open link* for a bare web link) instead of a `.txt`
+  with *Copy* (and *Open link* for a bare web link from a verified device)
+  instead of a `.txt`
   file. The popup only says who sent it; the text stays on the card.
 - **Who is there.** Multicast announcements on `224.0.0.167:53317`, answered
   with `POST /api/localsend/v2/register` (multicast answer as fallback),

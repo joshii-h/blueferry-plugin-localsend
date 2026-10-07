@@ -164,8 +164,10 @@ class UploadRequest:
         offer = self.files[0]
         if not offer.file_type.startswith("text/") or offer.preview is None:
             return None
-        if len(offer.preview.encode("utf-8")) != offer.size:
-            return None  # only a preview of a longer file
+        # Senders count the size in different ways (UTF-16, CRLF); a much
+        # larger size means the preview is only the start of a longer file.
+        if offer.size > 2 * len(offer.preview.encode("utf-8")) + 16:
+            return None
         return offer.preview
 
 

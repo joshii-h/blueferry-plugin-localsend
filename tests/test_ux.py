@@ -85,16 +85,48 @@ def test_probes_verify_devices_and_mark_the_ones_that_left(tmp_path, plugins, mo
     assert alice_host.item("devices")["title"] == "No devices found"
 
 
-def test_the_watcher_runs_until_stop(tmp_path, plugins) -> None:
+def test_the_watcher_runs_until_stop_and_a_restart_keeps_only_one(tmp_path, plugins) -> None:
     bob, _host = plugins("bob", probe_interval=0.05)
     calls = []
-    bob.check_devices = lambda quiet_for: calls.append(quiet_for)  # type: ignore[method-assign]
+    bob.check_devices = lambda quiet_for: calls.append(  # type: ignore[method-assign]
+        threading.current_thread())
     bob._start_watcher()
     _wait(lambda: len(calls) >= 2)
+    first = bob._watcher
+    bob.restart()
+    _wait(lambda: calls[-1] is not first)
+    threading.Event().wait(0.3)
+    assert not first.is_alive()
+    assert {thread for thread in calls[-3:]} == {bob._watcher}
     bob.stop()
     count = len(calls)
     threading.Event().wait(0.2)
     assert len(calls) <= count + 1
+
+
+def test_a_fingerprint_change_forgets_the_device(tmp_path, plugins) -> None:
+    alice, _alice_host = plugins("alice")
+    _bob, _bob_host = plugins("bob")
+    _wait(lambda: alice._registry.active())
+    device = alice._registry.active()[0]
+    alice._registry.clear()
+    forged = DeviceInfo(alias="bob", fingerprint="00" * 32, port=device.info.port)
+    alice._registry.seen(forged, device.address, verified=True)
+    alice.check_devices(0.0)
+    assert alice._registry.by_fingerprint("00" * 32) is None
+
+
+def test_the_watcher_rebinds_only_when_nothing_is_bound(tmp_path, plugins) -> None:
+    _alice, _host = plugins("alice")
+    bob, _bob_host = plugins("bob")
+    calls = []
+    bob.rebind = lambda: calls.append(1) or False  # type: ignore[method-assign]
+    bob._port_busy = True  # one address busy, the other one serving
+    bob.check_devices(0.0)
+    assert calls == []
+    bob._servers.stop()
+    bob.check_devices(0.0)
+    assert calls == [1]
 
 
 def test_a_busy_port_shows_on_the_card_and_retry_binds_again(tmp_path, plugins) -> None:
@@ -146,9 +178,15 @@ def test_a_text_message_is_shown_and_copied_not_saved(tmp_path, plugins, caplog)
     assert bob_host.invoke(item["id"], "copy")["ok"] is False
 
 
-def test_a_shared_link_can_be_opened_in_the_browser(tmp_path, plugins) -> None:
+def test_a_shared_link_opens_only_from_a_verified_device(tmp_path, plugins) -> None:
     bob, bob_host = plugins("bob")
     bob.receiver.prepare_upload(_message("https://example.org/a?b=1"), "127.0.0.1", {})
+    item = bob_host.item("msg-")
+    # Only claimed so far: anyone on the LAN can send a text.
+    assert [a["id"] for a in item["actions"]] == ["copy", "dismiss"]
+    assert bob_host.invoke(item["id"], "open")["ok"] is False
+    sender = bob._registry.by_fingerprint("F1")
+    bob._registry.answered("F1", sender.address, verified=True)
     item = bob_host.item("msg-")
     assert [a["id"] for a in item["actions"]] == ["copy", "open", "dismiss"]
     assert bob_host.invoke(item["id"], "open")["open_uri"] == "https://example.org/a?b=1"
@@ -159,10 +197,13 @@ def test_a_long_text_is_a_file_not_a_message(tmp_path, plugins) -> None:
 
     long_text = "x" * (MAX_MESSAGE_CHARS + 1)
     assert parse_prepare_upload(_message(long_text)).message is None
-    # A preview of a longer file (size larger than the text) is no message either.
+    # A preview of a longer file (size far larger than the text) is no message.
     raw = json.loads(_message("short"))
     raw["files"]["m1"]["size"] = 999
     assert parse_prepare_upload(json.dumps(raw).encode()).message is None
+    # A sender counting UTF-16 or CRLF still sends a message.
+    raw["files"]["m1"]["size"] = len("short".encode("utf-16-le"))
+    assert parse_prepare_upload(json.dumps(raw).encode()).message == "short"
 
 
 def test_receiving_can_be_cancelled_on_the_card(tmp_path, plugins) -> None:
@@ -222,7 +263,8 @@ def test_unreachable_devices_name_the_model(tmp_path, plugins) -> None:
 
 @pytest.mark.parametrize(("text", "link"), [
     ("https://example.org", True), ("http://x.y/z", True), ("see https://a.b", False),
-    ("ftp://x", False), ("https://a.b\nnext", False),
+    ("ftp://x", False), ("https://a.b\nnext", False), ("https://user:pw@host/x", False),
+    ("https://a.b/path@x", True), ("https://a.b\tx", False),
 ])
 def test_only_a_bare_web_link_gets_open(text, link) -> None:
     assert service_module._is_web_link(text) is link

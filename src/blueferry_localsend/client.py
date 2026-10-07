@@ -181,8 +181,13 @@ class PeerClient:
 
     def verify_peer(self, peer: Peer) -> bool:
         """Does the device at this address hold the certificate it claims?"""
+        return self.probe(peer) is None
+
+    def probe(self, peer: Peer) -> str | None:
+        """None when the device answers (over HTTPS with the claimed
+        certificate), else the reason: ``network`` or ``fingerprint``."""
         try:
             self._connection(peer, CONNECT_TIMEOUT).close()
-        except PeerError:
-            return False
-        return True
+        except PeerError as error:
+            return error.token
+        return None

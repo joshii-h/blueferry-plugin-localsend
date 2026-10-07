@@ -329,22 +329,34 @@ def test_hidden_plugin_does_not_announce(tmp_path, plugins) -> None:
 
 def test_manifest_declares_the_surfaces_and_settings(manifest) -> None:
     assert manifest.id == PLUGIN_ID
-    assert manifest.api_version == 1 and manifest.api_minor == 2
+    assert manifest.api_version == 1 and manifest.api_minor == 3
+    assert manifest.config_test is True and manifest.config_login == ""
+    assert manifest.min_blueferry == "0.8.1"
     assert set(manifest.capabilities) == {"card", "share", "notify"}
     keys = [field.key for field in manifest.config]
     assert keys[:2] == ["device_name", "visible"]
     assert {f.key: f.default for f in manifest.config}["port"] == 53317
-    assert {f.key: f.type for f in manifest.config}["pin"] == "secret"
+    fields = {f.key: f for f in manifest.config}
+    assert fields["pin"].type == "secret"
+    groups = {f.key: f.group for f in manifest.config}
+    assert [k for k, g in groups.items() if g == "security"] == [
+        "auto_accept_trusted", "require_pin", "pin", "allow_http_send"]
+    assert [k for k, g in groups.items() if g == "advanced"] == ["port", "interfaces", "http_scan"]
+    # The PIN is asked for only while "Require PIN" is on; that field comes first.
+    assert keys.index("require_pin") < keys.index("pin")
 
 
 def test_settings_form_masks_the_pin_and_validates(tmp_path, plugins, manifest) -> None:
     bob, _host = plugins("bob")
     client = PluginClient(manifest, transport=ServiceTransport(bob))
-    assert client.set_config({"require_pin": True}).errors == {
-        "pin": "set a PIN or turn the PIN off"}
-    assert client.set_config({"pin": "12ab"}).errors == {"pin": "must be 4 to 12 digits"}
+    # Shown (require_pin on) the PIN is required; hidden it is not.
+    assert client.set_config({"require_pin": True}).errors == {"pin": "is required"}
+    assert client.set_config({"require_pin": True, "pin": "12ab"}).errors == {
+        "pin": "Use 4 to 12 digits."}
     assert client.set_config({"interfaces": "wlp7s0; eth0"}).ok
     assert client.set_config({"require_pin": True, "pin": "4711"}).ok
+    # A stored PIN satisfies Required without being typed again.
+    assert client.set_config({"require_pin": True, "device_name": "bob"}).ok
     values = client.get_config()
     assert values["pin"] == "********" and values["require_pin"] is True
     assert values["interfaces"] == "wlp7s0, eth0"
@@ -575,3 +587,63 @@ def test_cancel_reaches_the_receiver_during_an_upload(tmp_path, plugins) -> None
             sock.close()
     assert failure, "the cancelled upload must not succeed"
     assert not (tmp_path / "bob" / "inbox" / "big.bin").exists()
+
+
+# ---- "Test connection" (TestConfig, ApiVersion 1.3) ---------------------------------
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_test_config_reports_devices_without_saving(tmp_path, plugins, caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    alice, alice_host = plugins("alice")
+    _bob, _bob_host = plugins("bob")
+    _wait(lambda: alice._registry.active())
+    before = SettingsStore(tmp_path / "alice" / "config").path.read_bytes()
+    result = alice_host.test_config({"port": alice.port, "device_name": "renamed"})
+    assert result["ok"] is True
+    assert result["message"] == (
+        f"Ready on lo-test, port {alice.port}. 1 device(s) found: bob.")
+    assert SettingsStore(tmp_path / "alice" / "config").path.read_bytes() == before
+    assert "bob" not in caplog.text.replace("blueferry", "")
+
+
+def test_test_config_finds_a_busy_port_and_a_free_one(tmp_path, plugins) -> None:
+    import socket
+
+    _alice, host = plugins("alice")
+    with socket.socket() as other:   # e.g. the LocalSend desktop app
+        other.bind(("127.0.0.1", 0))
+        other.listen()
+        busy = other.getsockname()[1]
+        result = host.test_config({"port": busy})
+    assert result["ok"] is False
+    assert result["errors"] == {"port": f"Port {busy} is in use, perhaps by the LocalSend app."}
+    free = _free_port()
+    result = host.test_config({"port": free, "visible": False})
+    assert result == {"ok": True, "message": (
+        f"Ready on lo-test, port {free}. Invisible: nobody can find this computer.")}
+
+
+def test_test_config_without_a_lan_interface(tmp_path, plugins) -> None:
+    alice, host = plugins("alice")
+    alice._interfaces_for = lambda names: []
+    result = host.test_config({"interfaces": "wlp7s0"})
+    assert result["ok"] is False and set(result["errors"]) == {"interfaces"}
+    result = host.test_config({"interfaces": "bad name!"})
+    assert result["ok"] is False and set(result["errors"]) == {"interfaces"}
+
+
+def test_test_config_never_sends_the_pin(tmp_path, plugins) -> None:
+    alice, host = plugins("alice")
+    result = host.test_config({"port": alice.port, "require_pin": True, "pin": "8642"})
+    assert result["ok"] is True
+    host.assert_never_sent("8642")

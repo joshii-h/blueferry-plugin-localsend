@@ -1,31 +1,47 @@
 [BlueFerry Plugin]
 Id=io.weirdware.blueferry.localsend
 Name=LocalSend
-Version=0.1.3
-ApiVersion=1.2
-MinBlueFerry=0.8
+Version=0.2.0
+ApiVersion=1.3
+MinBlueFerry=0.8.1
 Capabilities=card;share;notify;
 Homepage=https://github.com/joshii-h/blueferry-plugin-localsend
 Source=https://github.com/joshii-h/blueferry-plugin-localsend
 Exec=blueferry-localsend serve
 Cli=blueferry-localsend
 Alias=localsend
+ConfigTest=true
+
+[ConfigGroup options]
+Help=Open LocalSend on the iPhone; this computer shows up there while both are on the same network.
+
+[ConfigGroup security]
+Label=Security
+Help=Who may send files here without asking, and what this computer sends unencrypted.
+
+[ConfigGroup advanced]
+Help=Only needed when the iPhone does not find this computer.
 
 [Config device_name]
 Label=Device name
 Type=string
-Help=How this computer appears in LocalSend; empty uses the host name
+Group=options
+Placeholder=Battlestation
+Help=How this computer appears on the iPhone. Leave empty for the host name.
 
 [Config visible]
 Label=Visible
 Type=bool
 Default=true
+Group=options
 Help=Answer LocalSend devices on the network; off means no receiving
 
 [Config download_dir]
 Label=Download folder
 Type=string
-Help=Where received files go; empty uses ~/Downloads/iPhone
+Group=options
+Placeholder=~/Downloads/iPhone
+Help=Where received files go. Leave empty for ~/Downloads/iPhone.
 
 [Config max_size_mb]
 Label=Size limit (MB)
@@ -33,23 +49,40 @@ Type=int
 Default=4096
 Min=1
 Max=1048576
+Group=options
+ErrorText=Use 1 to 1048576 MB.
 Help=Requests above this total size are declined
 
 [Config auto_accept_trusted]
 Label=Accept trusted devices automatically
 Type=bool
 Default=false
+Group=security
 Help=Only devices marked with "Trust device" whose certificate matches
 
 [Config require_pin]
 Label=Require PIN
 Type=bool
 Default=false
+Group=security
+Help=The sender must enter this PIN before a transfer is offered.
 
 [Config pin]
 Label=PIN
 Type=secret
-Help=4 to 12 digits the sender must enter
+Required=true
+Group=security
+ShowIf=require_pin=true
+Pattern=[0-9]{4,12}
+ErrorText=Use 4 to 12 digits.
+Help=A short code you tell the sender; not an account password.
+
+[Config allow_http_send]
+Label=Send to devices without encryption
+Type=bool
+Default=false
+Group=security
+Help=Plain HTTP checks no certificate, so anyone on the LAN can pose as the device
 
 [Config port]
 Label=Port
@@ -57,21 +90,21 @@ Type=int
 Default=53317
 Min=1024
 Max=65535
+Advanced=true
+ErrorText=Use 1024 to 65535; LocalSend uses 53317.
 Help=TCP and UDP port; LocalSend devices use 53317
 
 [Config interfaces]
 Label=Network interfaces
 Type=string
-Help=Comma-separated, e.g. wlp7s0; empty picks the LAN automatically (never Docker or VPN)
+Advanced=true
+Placeholder=wlp7s0
+Example=wlp7s0, enp5s0
+Help=Comma-separated. Leave empty to pick the LAN automatically (never Docker or VPN).
 
 [Config http_scan]
 Label=Scan the subnet when multicast finds nothing
 Type=bool
 Default=false
+Advanced=true
 Help=Legacy discovery; probes every address of the own subnet (at most /22)
-
-[Config allow_http_send]
-Label=Send to devices without encryption
-Type=bool
-Default=false
-Help=Plain HTTP checks no certificate, so anyone on the LAN can pose as the device

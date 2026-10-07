@@ -5,7 +5,6 @@ import argparse
 import logging
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 
@@ -13,10 +12,16 @@ from blueferry.plugin_api.manifest import ManifestError, default_directories, pa
 from blueferry_plugin_kit.netaddr import lan_interfaces, parse_interface_list
 
 from blueferry_localsend import PLUGIN_ID, manifest_text
+from blueferry_localsend.autostart import (
+    ENTRY_POINT,
+    autostart_path,
+    set_autostart,
+)
+from blueferry_localsend.autostart import command as _command
+from blueferry_localsend.autostart import write as _write
 from blueferry_localsend.settings import SettingsError, SettingsStore
 from blueferry_localsend.tls import IdentityError, load_identity
 
-ENTRY_POINT = "blueferry-localsend"
 # The receiver must keep running; the base class would exit after 10 idle minutes.
 FOREVER = 10 ** 9
 
@@ -25,45 +30,13 @@ def _data_home() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
 
 
-def _config_home() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-
-
-def _command() -> list[str]:
-    """How the bus and BlueFerry should start this plugin."""
-    beside = Path(sys.executable).parent / ENTRY_POINT
-    if beside.is_file() and os.access(beside, os.X_OK):
-        return [str(beside)]
-    installed = shutil.which(ENTRY_POINT)
-    if installed:
-        return [installed]
-    import blueferry.plugin_api as api
-
-    roots = [
-        str(Path(__file__).resolve().parents[1]),
-        str(Path(api.__file__).resolve().parents[2]),
-    ]
-    return [
-        "/usr/bin/env", "PYTHONPATH=" + ":".join(dict.fromkeys(roots)),
-        sys.executable, "-m", "blueferry_localsend",
-    ]
-
-
-def _write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.chmod(0o644)
-    os.replace(temporary, path)
-
-
 def load_manifest(text: str | None = None):
     try:
         return parse_manifest(text or manifest_text())
     except ManifestError as error:
         raise ManifestError(
-            f"{error} (this plugin needs blueferry-plugin-api with ApiVersion 1.2: "
-            "card, share and notify)"
+            f"{error} (this plugin needs a BlueFerry with plugin API 1.4: card actions "
+            "that send files, ReplacesTools and the plugin log)"
         ) from None
 
 
@@ -88,29 +61,6 @@ def install_activation(data_home: Path | None = None) -> list[Path]:
         ))
         written.append(service)
     return written
-
-
-def autostart_path(config_home: Path | None = None) -> Path:
-    return (config_home or _config_home()) / "autostart" / f"{PLUGIN_ID}.desktop"
-
-
-def set_autostart(enabled: bool, config_home: Path | None = None) -> Path:
-    """Receiving needs the process running from login, not only on first use."""
-    path = autostart_path(config_home)
-    if not enabled:
-        path.unlink(missing_ok=True)
-        return path
-    _write(path, "\n".join([
-        "[Desktop Entry]",
-        "Type=Application",
-        "Name=BlueFerry LocalSend",
-        "Comment=Receive files from LocalSend devices",
-        "Exec=" + shlex.join([*_command(), "serve"]),
-        "NoDisplay=true",
-        "X-KDE-autostart-phase=2",
-        "",
-    ]))
-    return path
 
 
 def serve() -> int:

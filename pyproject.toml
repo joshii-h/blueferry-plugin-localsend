@@ -15,8 +15,8 @@ requires-python = ">=3.10"
 # the self-signed certificate once; tls.py imports it directly, so it stays
 # a direct dependency even though the kit's lanserver extra pulls it in too.
 dependencies = [
-  "blueferry-plugin-api @ git+https://github.com/joshii-h/blueferry@plugin-api-v1.3.0#subdirectory=plugin-api",
-  "blueferry-plugin-kit[lanserver] @ git+https://github.com/joshii-h/blueferry-plugin-kit@kit-v0.2.0",
+  "blueferry-plugin-api @ git+https://github.com/joshii-h/blueferry@plugin-api-v1.4.0#subdirectory=plugin-api",
+  "blueferry-plugin-kit[lanserver] @ git+https://github.com/joshii-h/blueferry-plugin-kit@kit-v0.3.0",
   "cryptography>=41,<51",
 ]
 

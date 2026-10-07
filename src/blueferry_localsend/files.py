@@ -4,8 +4,9 @@ A peer chooses the file names. They become paths only through
 :func:`safe_relative_path`: every component is cleaned, ``.``/``..`` and
 absolute paths are impossible, and the result is checked again against the
 target directory after resolving. Files are written to an owner-only temp
-file and then linked to a free name, so an existing file is never
-overwritten (a name collision gets a `` (1)`` suffix).
+file and then linked to a free name (or, without hard links, renamed onto a
+name claimed with ``O_EXCL``), so an existing file is never overwritten (a
+name collision gets a `` (1)`` suffix).
 """
 from __future__ import annotations
 
@@ -112,16 +113,42 @@ def _candidates(name: str):
         yield f"{stem} ({number}).{suffix}" if suffix else f"{stem} ({number})"
 
 
+def _claim(target: Path) -> None:
+    """Reserve ``target`` with an exclusive create; FileExistsError if taken."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    os.close(os.open(target, flags | getattr(os, "O_NOFOLLOW", 0), 0o600))
+
+
 def commit(temporary: Path, directory: Path, name: str) -> Path:
-    """Give the finished temp file a free name; never replace a file."""
+    """Give the finished temp file a free name; never replace a file.
+
+    A hard link fails if the name exists, atomically. File systems without
+    hard links (FAT, exFAT, many FUSE mounts) get the next best thing: the
+    free name is claimed with an exclusive create, then the temp file is
+    renamed over that empty placeholder, which only this process made.
+    """
     os.chmod(temporary, 0o644)
+    links = True
     for candidate in _candidates(name):
         target = directory / candidate
         try:
-            os.link(temporary, target)
+            if links:
+                try:
+                    os.link(temporary, target)
+                    temporary.unlink(missing_ok=True)
+                    return target
+                except FileExistsError:
+                    raise
+                except OSError:
+                    links = False  # no hard links here; claim names instead
+            _claim(target)
         except FileExistsError:
             continue
-        temporary.unlink(missing_ok=True)
+        try:
+            os.rename(temporary, target)
+        except OSError:
+            target.unlink(missing_ok=True)
+            raise
         return target
     raise OSError("no free file name")
 

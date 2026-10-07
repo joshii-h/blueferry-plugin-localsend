@@ -192,3 +192,18 @@ def test_register_is_rate_limited_per_address(tmp_path) -> None:
     assert recv.receiver.register(body, "10.0.0.3")[0] == 200
     now[0] += 61
     assert recv.receiver.register(body, "10.0.0.2")[0] == 200
+
+
+def test_commit_works_without_hard_links(tmp_path, monkeypatch) -> None:
+    def no_links(source, target):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(fs.os, "link", no_links)
+    (tmp_path / "a.txt").write_bytes(b"old")
+    descriptor, temporary = fs.open_temporary(tmp_path)
+    os.write(descriptor, b"new")
+    os.close(descriptor)
+    path = fs.commit(temporary, tmp_path, "a.txt")
+    assert path.name == "a (1).txt" and path.read_bytes() == b"new"
+    assert (tmp_path / "a.txt").read_bytes() == b"old"
+    assert not temporary.exists()

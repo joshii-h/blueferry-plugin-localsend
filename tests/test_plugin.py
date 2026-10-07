@@ -426,3 +426,21 @@ def test_announcements_are_answered_by_a_bounded_pool(tmp_path, plugins) -> None
     release.set()
     _wait(lambda: not bob._answering)
     assert bob._background("10.0.0.2", slow, "10.0.0.2") is True
+
+
+def test_http_log_never_contains_the_query(tmp_path, plugins, caplog) -> None:
+    import logging
+
+    alice, _alice_host = plugins("alice")
+    bob, _bob_host = plugins("bob")
+    _wait(lambda: alice._registry.active())
+    caplog.set_level(logging.DEBUG, logger="blueferry_localsend")
+    peer = Peer("127.0.0.1", bob.port, "https", bob.identity().fingerprint)
+    PeerClient(alice.identity().client_context()).cancel(peer, "secret-session-4711")
+    PeerClient(alice.identity().client_context())._request(
+        peer, "/nothing", None, timeout=5, query={"pin": "4711", "token": "t0ken"})
+    _wait(lambda: any("http:" in r.getMessage() for r in caplog.records))
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "POST 200" in text or "POST 404" in text
+    for secret in ("4711", "t0ken", "secret-session", "/api/"):
+        assert secret not in text

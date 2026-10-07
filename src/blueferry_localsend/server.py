@@ -393,7 +393,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     server: LocalSendServer
 
     def log_message(self, format: str, *args) -> None:
-        log.debug("http: " + format, *args)
+        """Never log the request line: its query carries the PIN and tokens."""
+
+    def log_request(self, code: object = "-", size: object = "-") -> None:
+        log.debug("http: %s %s", self.command, code)
 
     def _route(self) -> tuple[str, dict[str, str]]:
         parsed = urllib.parse.urlsplit(self.path)

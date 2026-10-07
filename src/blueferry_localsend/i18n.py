@@ -52,6 +52,12 @@ _DE = {
     "not_verified": "Zertifikat des Geräts noch nicht geprüft",
     "ok_listening": "Empfang auf {where}",
     "no_interface": "Keine LAN-Schnittstelle gefunden",
+    "test_no_interface": "Keine nutzbare LAN-Schnittstelle (Docker und VPN zählen nicht).",
+    "test_port_busy": "Port {port} ist belegt, vielleicht von der LocalSend-App.",
+    "test_ready": "Bereit auf {where}, Port {port}.",
+    "test_devices": "{count} Gerät(e) gefunden: {names}.",
+    "test_no_devices": "Noch kein Gerät gefunden; öffne LocalSend auf dem iPhone.",
+    "test_invisible": "Unsichtbar: niemand findet diesen PC.",
     "localsend": "LocalSend",
 }
 
@@ -104,6 +110,12 @@ _EN = {
     "not_verified": "The device's certificate has not been checked yet",
     "ok_listening": "Receiving on {where}",
     "no_interface": "No LAN interface found",
+    "test_no_interface": "No usable LAN interface (Docker and VPN do not count).",
+    "test_port_busy": "Port {port} is in use, perhaps by the LocalSend app.",
+    "test_ready": "Ready on {where}, port {port}.",
+    "test_devices": "{count} device(s) found: {names}.",
+    "test_no_devices": "No device found yet; open LocalSend on the iPhone.",
+    "test_invisible": "Invisible: nobody can find this computer.",
     "localsend": "LocalSend",
 }
 

@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import subprocess  # nosec B404 - only xdg-open with a file:// URI, no shell
 import threading
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from blueferry.plugin_api.config import ConfigError
+from blueferry.plugin_api.config_flow import ConfigTestResult
 from blueferry.plugin_api.manifest import PluginManifest
 from blueferry.plugin_api.service import PluginCallError
 from blueferry_plugin_kit.lanserver import ServerGroup
@@ -798,8 +800,9 @@ class LocalSendService(SurfacesService):
             "allow_http_send": settings.allow_http_send,
         }
 
-    def apply_config(self, values: dict[str, object]) -> None:
-        current = self._settings()
+    @staticmethod
+    def _checked_form(values: dict[str, object]) -> tuple[str, str, list[str]]:
+        """Device name, download folder and interface names, or ConfigError."""
         name = str(values.get("device_name") or "")
         if len(name) > 64:
             raise ConfigError("device_name", "is too long (64 characters at most)")
@@ -809,6 +812,40 @@ class LocalSendService(SurfacesService):
         names = parse_interface_list(str(values.get("interfaces") or ""))
         if any(not _INTERFACE_NAME.fullmatch(n) for n in names):
             raise ConfigError("interfaces", "must be interface names separated by commas")
+        return name, directory, names
+
+    def test_config(self, values: dict[str, object]) -> ConfigTestResult:
+        """"Test connection": interfaces, a free (or our own) port, devices.
+
+        Nothing is stored and the running servers stay as they are. Device
+        names appear only in the answer, never in the log.
+        """
+        _name, _directory, names = self._checked_form(values)
+        interfaces = self._interfaces_for(names)
+        if not interfaces:
+            raise ConfigError("interfaces", t("test_no_interface"))
+        port = int(values.get("port") or DEFAULT_PORT)  # type: ignore[arg-type]
+        if port not in self._servers.ports:
+            for address in dict.fromkeys(i.address for i in interfaces):
+                if not _port_free(address, port):
+                    log.info("settings test: the port is in use")
+                    raise ConfigError("port", t("test_port_busy", port=port))
+        where = ", ".join(dict.fromkeys(i.name for i in interfaces))
+        message = t("test_ready", where=where, port=port)
+        if not bool(values.get("visible", True)):
+            return ConfigTestResult(True, f"{message} {t('test_invisible')}")
+        self.refresh_devices()
+        found = [device.info.alias for device in self._registry.active()]
+        log.info("settings test: %d device(s) found", len(found))
+        if found:
+            return ConfigTestResult(True, f"{message} " + t(
+                "test_devices", count=len(found), names=", ".join(found[:5]),
+            ))
+        return ConfigTestResult(True, f"{message} {t('test_no_devices')}")
+
+    def apply_config(self, values: dict[str, object]) -> None:
+        current = self._settings()
+        name, directory, names = self._checked_form(values)
         pin = current.pin
         if "pin" in values:
             pin = str(values["pin"])
@@ -841,6 +878,21 @@ class LocalSendService(SurfacesService):
             self.restart()
         else:
             self.emit_card_changed()
+
+
+def _port_free(address: str, port: int) -> bool:
+    """Can TCP and UDP bind ``port`` on ``address``? (LocalSend uses both.)"""
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        try:
+            with socket.socket(family, kind) as probe:
+                if kind == socket.SOCK_DGRAM:
+                    # The multicast socket shares the port with SO_REUSEADDR.
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind((address, port))
+        except OSError:
+            return False
+    return True
 
 
 def _percent(done: int, total: int) -> int:

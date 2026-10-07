@@ -487,18 +487,91 @@ def test_a_trickling_client_is_cut_off_at_the_request_deadline(
     assert closed and time.monotonic() - started < 3
 
 
-def test_at_most_two_connections_per_address(tmp_path, plugins) -> None:
+def test_at_most_four_connections_per_address(tmp_path, plugins) -> None:
+    from blueferry_localsend.server import MAX_CONNECTIONS_PER_ADDRESS
+
+    assert MAX_CONNECTIONS_PER_ADDRESS == 4
     bob, _host = plugins("bob")
-    first, second = _tls(bob.port), _tls(bob.port)
+    held = [_tls(bob.port) for _ in range(4)]
     with pytest.raises(OSError):
-        third = _tls(bob.port)
-        third.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\n\r\n")
-        if third.recv(1) == b"":
+        extra = _tls(bob.port)
+        extra.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\n\r\n")
+        if extra.recv(1) == b"":
             raise ConnectionResetError
-    first.close()
-    second.close()
-    time.sleep(0.2)
-    fourth = _tls(bob.port)
-    fourth.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n")
-    assert fourth.recv(12).startswith(b"HTTP/1.1 200")
-    fourth.close()
+    for sock in held:
+        sock.close()
+    _wait(lambda: _info_answers(bob.port))
+
+
+def _info_answers(port: int) -> bool:
+    try:
+        sock = _tls(port)
+    except OSError:
+        return False
+    try:
+        sock.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n")
+        return sock.recv(12).startswith(b"HTTP/1.1 200")
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _idle_keep_alive(port: int):
+    """A connection like the phone's HTTP client keeps after a request."""
+    sock = _tls(port)
+    sock.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert sock.recv(12).startswith(b"HTTP/1.1 200")
+    return sock
+
+
+def test_cancel_reaches_the_receiver_during_an_upload(tmp_path, plugins) -> None:
+    """A phone's real send: idle keep-alive connections from discovery and
+    the earlier requests, one running upload, then Cancel on a new one."""
+    alice, _alice_host = plugins("alice")
+    bob, _bob_host = plugins("bob", settings=Settings(auto_accept_trusted=True))
+    _wait(lambda: bob._registry.active() and bob._registry.active()[0].verified)
+    bob._store.trust(alice.identity().fingerprint, "alice")
+    _wait(lambda: alice._registry.active())
+    device = alice._registry.active()[0]
+    peer = Peer("127.0.0.1", device.info.port, "https", device.info.fingerprint)
+    client = PeerClient(alice.identity().client_context())
+    data = os.urandom(4 * 1024 * 1024)
+    path = tmp_path / "big.bin"
+    path.write_bytes(data)
+    session, tokens = client.prepare_upload(
+        peer, alice.me(), {"f": _offer("f", "big.bin", data)},
+    )
+    idle = [_idle_keep_alive(bob.port), _idle_keep_alive(bob.port)]
+    in_upload = threading.Event()
+    release = threading.Event()
+    failure: list[PeerError] = []
+
+    def progress(_sent: int) -> None:
+        in_upload.set()
+        release.wait(10)
+
+    def upload() -> None:
+        try:
+            client.upload(peer, session, "f", tokens["f"], path, len(data),
+                          progress, lambda: False)
+        except PeerError as error:
+            failure.append(error)
+
+    worker = threading.Thread(target=upload)
+    worker.start()
+    try:
+        assert in_upload.wait(10)
+        # idle + idle + upload: Cancel is the fourth connection of this address.
+        status, _body = client._request(
+            peer, "/cancel", None, timeout=5, query={"sessionId": session},
+        )
+        assert status == 200
+        assert bob.receiver.active is None
+    finally:
+        release.set()
+        worker.join(15)
+        for sock in idle:
+            sock.close()
+    assert failure, "the cancelled upload must not succeed"
+    assert not (tmp_path / "bob" / "inbox" / "big.bin").exists()

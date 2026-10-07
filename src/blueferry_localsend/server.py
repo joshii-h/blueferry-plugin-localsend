@@ -64,7 +64,12 @@ REQUEST_DEADLINE = 30.0
 # hits but a trickling client does.
 UPLOAD_GRACE = 60.0
 MIN_UPLOAD_RATE = 16 * 1024
-MAX_CONNECTIONS_PER_ADDRESS = 2
+# A phone holds more than one connection while it sends: LocalSend's HTTP
+# clients keep idle connections open (discovery's register/info and the
+# sender's own), the upload runs on one, and Cancel needs another. With two
+# a cancel or a register during a transfer was refused. Four still keeps
+# one address from taking a noticeable share of MAX_CONNECTIONS.
+MAX_CONNECTIONS_PER_ADDRESS = 4
 
 
 @dataclass

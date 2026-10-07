@@ -25,6 +25,9 @@ MAX_DATAGRAM_BYTES = 4096
 MAX_FILES_PER_SESSION = 1000
 MAX_ALIAS = 64
 MAX_FIELD = 255
+# A text "file" whose preview carries the whole text is a message
+# (LocalSend's "Text"): shown, not saved. Longer texts arrive as files.
+MAX_MESSAGE_CHARS = 16 * 1024
 _FINGERPRINT = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")  # random text in HTTP mode
 # Ids and tokens are opaque; the spec examples even contain spaces.
 _TOKENISH = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
@@ -140,6 +143,7 @@ class FileOffer:
     size: int
     file_type: str = ""
     sha256: str = ""
+    preview: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +154,19 @@ class UploadRequest:
     @property
     def total_size(self) -> int:
         return sum(offer.size for offer in self.files)
+
+    @property
+    def message(self) -> str | None:
+        """The text of a message (one text file with the whole text as its
+        preview, as LocalSend sends a "Text"), or None for real files."""
+        if len(self.files) != 1:
+            return None
+        offer = self.files[0]
+        if not offer.file_type.startswith("text/") or offer.preview is None:
+            return None
+        if len(offer.preview.encode("utf-8")) != offer.size:
+            return None  # only a preview of a longer file
+        return offer.preview
 
 
 def parse_prepare_upload(raw: bytes) -> UploadRequest:
@@ -184,8 +201,15 @@ def parse_prepare_upload(raw: bytes) -> UploadRequest:
             size=size,
             file_type=_text(entry.get("fileType"), MAX_FIELD, "fileType", required=False),
             sha256=(digest or "").lower(),
+            preview=_preview(entry.get("preview")),
         ))
     return UploadRequest(info=info, files=tuple(offers))
+
+
+def _preview(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > MAX_MESSAGE_CHARS or "\x00" in value:
+        return None
+    return value
 
 
 def parse_prepare_response(raw: bytes) -> tuple[str, dict[str, str]]:

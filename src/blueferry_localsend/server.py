@@ -117,9 +117,11 @@ class Receiver:
         decide: Callable[[UploadRequest, str], bool],
         on_register: Callable[[DeviceInfo, str], None],
         on_change: Callable[[Session], None],
+        on_message: Callable[[UploadRequest, str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._me = me
+        self._on_message = on_message
         self._policy = policy
         self._decide = decide
         self._on_register = on_register
@@ -196,6 +198,10 @@ class Receiver:
             return 400, None
         if request.info.fingerprint.upper() == self._me().fingerprint.upper():
             return 400, None
+        if request.message is not None and self._on_message is not None:
+            # "Finished (no file transfer needed)": LocalSend shows a text.
+            self._on_message(request, address)
+            return 204, None
         with self._lock:
             if self._current() is not None or self._asking:
                 return 409, None
@@ -240,6 +246,19 @@ class Receiver:
             self._session = None
         self._on_change(session)
         return 200
+
+    def cancel_active(self) -> bool:
+        """The user cancelled receiving here; running uploads stop and the
+        sender's next upload is refused. False if nothing was running."""
+        with self._lock:
+            session = self._current()
+            if session is None:
+                return False
+            session.failed = True
+            session.finished = True
+            self._session = None
+        self._on_change(session)
+        return True
 
     def upload(
         self, query: dict[str, str], address: str, stream: BinaryIO, length: int | None,

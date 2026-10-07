@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from blueferry_localsend import files as fs
+from blueferry_localsend.limits import ConnectionsPerAddress, DeadlineReader, deadline_rfile
 from blueferry_localsend.protocol import (
     API_PREFIX,
     MAX_JSON_BYTES,
@@ -52,6 +53,14 @@ MAX_CONNECTIONS = 32
 DISK_RESERVE = 100 * 1024 * 1024
 READ_CHUNK = 256 * 1024
 REQUEST_SOCKET_TIMEOUT = 60.0
+# Request line, headers and JSON bodies (at most 1 MB) must arrive within
+# this; the wait between keep-alive requests counts too.
+REQUEST_DEADLINE = 30.0
+# Upload bodies: 60 s plus one second per 16 KiB, a floor no real transfer
+# hits but a trickling client does.
+UPLOAD_GRACE = 60.0
+MIN_UPLOAD_RATE = 16 * 1024
+MAX_CONNECTIONS_PER_ADDRESS = 2
 
 
 @dataclass
@@ -391,6 +400,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
     timeout = REQUEST_SOCKET_TIMEOUT
     server: LocalSendServer
+    _deadline: DeadlineReader
+
+    def setup(self) -> None:
+        super().setup()
+        # Replace the plain socket file: every read now respects the
+        # request's remaining time, not only a per-read timeout.
+        self.rfile.close()
+        self._deadline, self.rfile = deadline_rfile(self.connection, REQUEST_SOCKET_TIMEOUT)
+
+    def handle_one_request(self) -> None:
+        self._deadline.start(REQUEST_DEADLINE)
+        super().handle_one_request()
 
     def log_message(self, format: str, *args) -> None:
         """Never log the request line: its query carries the PIN and tokens."""
@@ -436,6 +457,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         address = self.client_address[0]
         receiver = self.server.receiver
         if route == "upload":
+            self._deadline.stream(UPLOAD_GRACE, MIN_UPLOAD_RATE)
             chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
             try:
                 length = None if chunked else int(self.headers.get("Content-Length") or "x")
@@ -474,11 +496,13 @@ class LocalSendServer(http.server.ThreadingHTTPServer):
     def __init__(
         self, address: tuple[str, int], receiver: Receiver,
         context: ssl.SSLContext | None, allowed: Callable[[str], bool],
+        per_address: ConnectionsPerAddress | None = None,
     ) -> None:
         self.receiver = receiver
         self._context = context
         self._allowed = allowed
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._per_address = per_address or ConnectionsPerAddress(MAX_CONNECTIONS_PER_ADDRESS)
         super().__init__(address, _Handler)
 
     def handle_error(self, request, client_address) -> None:
@@ -493,22 +517,31 @@ class LocalSendServer(http.server.ThreadingHTTPServer):
         if not self._slots.acquire(blocking=False):
             self.shutdown_request(request)
             return
+        if not self._per_address.acquire(client_address[0]):
+            self._slots.release()
+            self.shutdown_request(request)
+            return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release(client_address)
             raise
+
+    def _release(self, client_address) -> None:
+        self._per_address.release(client_address[0])
+        self._slots.release()
 
     def process_request_thread(self, request, client_address) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._release(client_address)
 
     def finish_request(self, request, client_address) -> None:
         # The TLS handshake runs here, on the connection's own thread, so a
-        # slow client never holds up accept().
-        request.settimeout(REQUEST_SOCKET_TIMEOUT)
+        # slow client never holds up accept(). The socket timeout bounds the
+        # whole handshake (CPython counts it as one deadline), not each read.
+        request.settimeout(REQUEST_DEADLINE)
         if self._context is not None:
             try:
                 request = self._context.wrap_socket(request, server_side=True)
@@ -523,6 +556,8 @@ class ServerGroup:
     def __init__(self) -> None:
         self.servers: list[LocalSendServer] = []
         self._threads: list[threading.Thread] = []
+        # Shared, so a client cannot multiply its share by using every address.
+        self._per_address = ConnectionsPerAddress(MAX_CONNECTIONS_PER_ADDRESS)
 
     def start(
         self, addresses: list[str], port: int, receiver: Receiver,
@@ -532,7 +567,9 @@ class ServerGroup:
         failed = []
         for address in addresses:
             try:
-                server = LocalSendServer((address, port), receiver, context, allowed)
+                server = LocalSendServer(
+                    (address, port), receiver, context, allowed, self._per_address,
+                )
             except OSError as error:
                 log.warning("cannot listen on %s:%d: %s", address, port, error.strerror)
                 failed.append(address)

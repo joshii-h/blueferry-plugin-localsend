@@ -115,8 +115,10 @@ trusted devices.
   announced per file is enforced while receiving, a SHA-256 sent along is
   verified, and the total is limited by `max_size_mb` and free disk space.
 - **Limits.** One session at a time, ten upload requests and twenty
-  registrations per minute per address, 32 connections, timeouts on every
-  socket. Card updates caused by discovery are sent at most once a second.
+  registrations per minute per address, 32 connections and at most two per
+  address. Every request has a total deadline (30 s for the request line,
+  headers and JSON bodies; uploads get 60 s plus one second per 16 KiB), so a
+  client trickling bytes cannot hold a connection open. Card updates caused by discovery are sent at most once a second.
 - **Secrets.** The private key and the settings (including the PIN) are in
   owner-only files below
   `~/.config/blueferry/plugins/io.weirdware.blueferry.localsend/`. Logs never

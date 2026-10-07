@@ -444,3 +444,61 @@ def test_http_log_never_contains_the_query(tmp_path, plugins, caplog) -> None:
     assert "POST 200" in text or "POST 404" in text
     for secret in ("4711", "t0ken", "secret-session", "/api/"):
         assert secret not in text
+
+
+def _tls(port: int):
+    import socket
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context.wrap_socket(socket.create_connection(("127.0.0.1", port), timeout=5))
+
+
+def test_a_trickling_client_is_cut_off_at_the_request_deadline(
+    tmp_path, plugins, monkeypatch,
+) -> None:
+    from blueferry_localsend import server as server_module
+
+    monkeypatch.setattr(server_module, "REQUEST_DEADLINE", 0.6)
+    bob, _host = plugins("bob")
+    sock = _tls(bob.port)
+    started = time.monotonic()
+    closed = False
+    for byte in b"POST /api/localsend/v2/register HTTP/1.1\r\nHost: x\r\n":
+        try:
+            sock.sendall(bytes([byte]))
+            time.sleep(0.05)
+            sock.setblocking(False)
+            try:
+                if sock.recv(1) == b"":
+                    closed = True
+                    break
+            except (BlockingIOError, __import__("ssl").SSLWantReadError):
+                pass
+            finally:
+                sock.setblocking(True)
+        except OSError:
+            closed = True
+            break
+    sock.close()
+    # Each byte came well within the per-read timeout, yet the request ended.
+    assert closed and time.monotonic() - started < 3
+
+
+def test_at_most_two_connections_per_address(tmp_path, plugins) -> None:
+    bob, _host = plugins("bob")
+    first, second = _tls(bob.port), _tls(bob.port)
+    with pytest.raises(OSError):
+        third = _tls(bob.port)
+        third.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\n\r\n")
+        if third.recv(1) == b"":
+            raise ConnectionResetError
+    first.close()
+    second.close()
+    time.sleep(0.2)
+    fourth = _tls(bob.port)
+    fourth.sendall(b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert fourth.recv(12).startswith(b"HTTP/1.1 200")
+    fourth.close()

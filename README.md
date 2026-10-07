@@ -38,6 +38,14 @@ process on the session bus and talks to BlueFerry only through
 Not implemented: the download API (section 5 of the spec, browser downloads
 over plain HTTP) and sending to devices that require a PIN.
 
+**Protocol version.** The plugin speaks v2.2 and announces `"version":
+"2.2"`. The only change from 2.1 is the `422` answer to an upload whose
+SHA-256 does not match the one sent in `prepare-upload`; the receiver
+already checks it, and the sender now reports it as a damaged file. Peers
+announcing any 2.x are accepted. The v3 draft (nonce exchange, signed
+tokens, `/api/localsend/v3`) is not implemented: devices announcing 3.x are
+ignored until LocalSend apps ship it.
+
 ## Install
 
 ```sh

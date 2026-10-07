@@ -12,7 +12,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-PROTOCOL_VERSION = "2.1"
+# 2.2 only adds 422 for a sha256 mismatch on upload, which the receiver
+# already answers and the sender reports as "checksum".
+PROTOCOL_VERSION = "2.2"
 DEFAULT_PORT = 53317
 MULTICAST_GROUP = "224.0.0.167"
 API_PREFIX = "/api/localsend/v2"

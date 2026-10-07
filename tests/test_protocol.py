@@ -111,3 +111,19 @@ def test_identity_is_created_once_and_owner_only(tmp_path) -> None:
     cert = x509.load_pem_x509_certificate(first.cert_path.read_bytes())
     assert cert.subject.rfc4514_string() == "CN=LocalSend User"
     assert cert.public_key().key_size == 2048
+
+
+def test_protocol_2_2_checksum_answer_and_every_reason_is_worded() -> None:
+    from blueferry_localsend import i18n
+    from blueferry_localsend.client import PeerClient, PeerError
+    from blueferry_localsend.protocol import PROTOCOL_VERSION
+
+    assert PROTOCOL_VERSION == "2.2"
+    try:
+        PeerClient._raise_for(422)
+    except PeerError as error:
+        assert error.token == "checksum"
+    tokens = ("network", "fingerprint", "rejected", "pin", "busy", "too-many", "checksum",
+              "bad-response", "cancelled", "insecure", "error")
+    for token in tokens:
+        assert f"reason_{token}" in i18n._EN and f"reason_{token}" in i18n._DE

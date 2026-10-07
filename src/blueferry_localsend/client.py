@@ -34,7 +34,7 @@ CHUNK = 256 * 1024
 
 class PeerError(Exception):
     """``token`` is one of: network, fingerprint, rejected, pin, busy,
-    too-many, bad-response, cancelled, error."""
+    too-many, checksum, bad-response, cancelled, insecure, error."""
 
     def __init__(self, token: str, status: int = 0) -> None:
         super().__init__(token)
@@ -42,7 +42,7 @@ class PeerError(Exception):
         self.status = status
 
 
-_STATUS_TOKENS = {401: "pin", 403: "rejected", 409: "busy", 429: "too-many"}
+_STATUS_TOKENS = {401: "pin", 403: "rejected", 409: "busy", 422: "checksum", 429: "too-many"}
 
 
 @dataclass(frozen=True, slots=True)

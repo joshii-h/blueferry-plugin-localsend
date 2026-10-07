@@ -15,6 +15,7 @@ from pathlib import Path
 
 from blueferry_plugin_kit.secrets import SecretsError, check_private, private_dir, write_private
 
+
 class IdentityError(SecretsError):
     """The TLS identity is unusable; the kit's file errors arrive as this."""
 

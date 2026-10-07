@@ -65,6 +65,8 @@ from blueferry_localsend.surfaces import (
 from blueferry_localsend.tls import Identity, IdentityError, fingerprint_of, load_identity
 
 log = logging.getLogger(__name__)
+# ServerGroup warnings appear under the server module, as before the kit.
+server_log = logging.getLogger("blueferry_localsend.server")
 
 DECISION_TIMEOUT = 60.0
 ANNOUNCE_INTERVAL = 10.0
@@ -167,7 +169,9 @@ class LocalSendService(SurfacesService):
         self._registry = DeviceRegistry()
         # The per-address cap is shared by all servers, so a client cannot
         # multiply its share by using every address.
-        self._servers = ServerGroup(MAX_CONNECTIONS_PER_ADDRESS, name="localsend-http")
+        self._servers = ServerGroup(
+            MAX_CONNECTIONS_PER_ADDRESS, name="localsend-http", logger=server_log,
+        )
         self._active_interfaces: list[Interface] = []
         self._problem = ""
         self._pending: dict[str, Pending] = {}

@@ -379,9 +379,9 @@ class _Handler(DeadlineRequestHandler):
     def request_deadline(self) -> float:
         return REQUEST_DEADLINE  # read at runtime, tests shorten it
 
-    def log_request(self, code: object = "-", size: object = "-") -> None:
-        # Under this plugin's logger, not the kit's.
-        log.debug("http: %s %s", self.command, code)
+    # Under this plugin's logger, not the kit's.
+    log = log
+    log_prefix = "http: "
 
     def _route(self) -> tuple[str, dict[str, str]]:
         parsed = urllib.parse.urlsplit(self.path)
@@ -455,6 +455,8 @@ class _Handler(DeadlineRequestHandler):
 class LocalSendServer(HardenedHTTPServer):
     """Connection caps, the subnet allowlist and the TLS handshake on the
     connection's own thread come from the kit."""
+
+    log = log
 
     def __init__(
         self, address: tuple[str, int], receiver: Receiver,

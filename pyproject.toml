@@ -14,11 +14,11 @@ requires-python = ">=3.10"
 # self-signed certificate once.
 dependencies = [
   "blueferry-plugin-api @ git+https://github.com/joshii-h/blueferry@plugin-api-v1.2.0#subdirectory=plugin-api",
-  "cryptography>=41",
+  "cryptography>=41,<51",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.5"]
+dev = ["pytest>=7,<10", "ruff>=0.5,<1"]
 
 [project.urls]
 Homepage = "https://github.com/joshii-h/blueferry-plugin-localsend"

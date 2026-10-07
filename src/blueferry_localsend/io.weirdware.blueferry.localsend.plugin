@@ -69,3 +69,9 @@ Label=Scan the subnet when multicast finds nothing
 Type=bool
 Default=false
 Help=Legacy discovery; probes every address of the own subnet (at most /22)
+
+[Config allow_http_send]
+Label=Send to devices without encryption
+Type=bool
+Default=false
+Help=Plain HTTP checks no certificate, so anyone on the LAN can pose as the device

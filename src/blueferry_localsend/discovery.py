@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from blueferry_localsend.netif import Interface
@@ -118,9 +118,18 @@ class UdpMulticast:
 
 @dataclass(frozen=True, slots=True)
 class Device:
+    """A device seen on the LAN.
+
+    ``verified`` means this plugin itself connected to ``address`` over
+    HTTPS and the certificate there matched ``info.fingerprint``. Anything
+    else (an announcement, an incoming register, an upload request) is only
+    a claim: anyone on the LAN can send any fingerprint.
+    """
+
     info: DeviceInfo
     address: str
     last_seen: float
+    verified: bool = False
 
     @property
     def target_id(self) -> str:
@@ -139,8 +148,14 @@ class DeviceRegistry:
         self._lock = threading.Lock()
         self._devices: dict[str, Device] = {}
 
-    def seen(self, info: DeviceInfo, address: str) -> bool:
-        """Record a device; True when it is new or its details changed."""
+    def seen(self, info: DeviceInfo, address: str, *, verified: bool = False) -> bool:
+        """Record a device; True when it is new or its details changed.
+
+        An unverified claim never replaces a verified entry: a LAN attacker
+        announcing a known fingerprint (say with ``protocol: "http"``) must
+        not take over that device's address, endpoint or trust badge. It
+        only refreshes the entry when it repeats exactly what was verified.
+        """
         try:
             ipaddress.IPv4Address(address)
         except ValueError:
@@ -148,13 +163,36 @@ class DeviceRegistry:
         key = info.fingerprint.upper()
         if key == self.own_fingerprint:
             return False
+        now = self._clock()
         with self._lock:
             previous = self._devices.get(key)
-            self._devices[key] = Device(info, address, self._clock())
-            if len(self._devices) > MAX_DEVICES:
-                oldest = min(self._devices.values(), key=lambda d: d.last_seen)
-                self._devices.pop(oldest.info.fingerprint.upper(), None)
-        return previous is None or previous.info != info or previous.address != address
+            if previous is not None and previous.verified and not verified:
+                if previous.address == address and previous.info == info:
+                    self._devices[key] = replace(previous, last_seen=now)
+                return False
+            if previous is None and len(self._devices) >= MAX_DEVICES and not self._evict(
+                verified,
+            ):
+                return False
+            self._devices[key] = Device(info, address, now, verified)
+        return (
+            previous is None or previous.info != info or previous.address != address
+            or previous.verified != verified
+        )
+
+    def _evict(self, for_verified: bool) -> bool:
+        """Make room for one entry. Caller holds the lock.
+
+        Unverified entries go first; verified ones only for another verified
+        device, so a flood of announcements never pushes a verified device out.
+        """
+        unverified = [d for d in self._devices.values() if not d.verified]
+        pool = unverified or (list(self._devices.values()) if for_verified else [])
+        if not pool:
+            return False
+        oldest = min(pool, key=lambda d: d.last_seen)
+        self._devices.pop(oldest.info.fingerprint.upper(), None)
+        return True
 
     def active(self) -> list[Device]:
         now = self._clock()

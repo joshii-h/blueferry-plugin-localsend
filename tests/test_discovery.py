@@ -109,3 +109,22 @@ def test_registry_ignores_itself_and_expires() -> None:
     assert registry.by_fingerprint("AB12").address == "192.168.1.3"
     now[0] += discovery_module.DEVICE_TTL + 1
     assert registry.active() == []
+
+
+def test_unverified_claims_never_replace_or_evict_verified_devices() -> None:
+    now = [1000.0]
+    registry = DeviceRegistry("ME", clock=lambda: now[0])
+    phone = DeviceInfo(alias="iPhone", fingerprint="AB12")
+    assert registry.seen(phone, "192.168.1.3", verified=True) is True
+    spoof = DeviceInfo(alias="iPhone", fingerprint="AB12", protocol="http", port=80)
+    assert registry.seen(spoof, "192.168.1.66") is False
+    kept = registry.by_fingerprint("AB12")
+    assert kept.verified and kept.address == "192.168.1.3" and kept.info.protocol == "https"
+    # A verified answer from a new address (DHCP) does move it.
+    assert registry.seen(phone, "192.168.1.4", verified=True) is True
+    # A flood of unverified announcements cannot push it out.
+    for number in range(discovery_module.MAX_DEVICES * 2):
+        now[0] += 1
+        registry.seen(DeviceInfo(alias="x", fingerprint=f"F{number}"), "192.168.1.9")
+    assert registry.by_fingerprint("AB12") is not None
+    assert len(registry.active()) == discovery_module.MAX_DEVICES

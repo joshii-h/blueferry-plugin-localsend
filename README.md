@@ -73,6 +73,7 @@ In BlueFerry's settings, Plugins > LocalSend > Settings, or
 | `port` | TCP and UDP port (default 53317, like LocalSend). |
 | `interfaces` | Comma-separated interface names; empty picks the LAN automatically. |
 | `http_scan` | Legacy subnet scan when multicast finds nothing. |
+| `allow_http_send` | Also send to devices that only offer plain HTTP (default off; nothing pins their identity). |
 
 `blueferry plugins localsend status` shows the name, the certificate
 fingerprint, the interfaces in use and the folder;
@@ -95,7 +96,16 @@ trusted devices.
   *claims* a fingerprint, so before accepting a trusted device automatically
   the plugin connects back to it and checks that it presents the matching
   certificate. When sending, the receiver's certificate is pinned to the
-  announced fingerprint; on a mismatch nothing is sent. The first contact is
+  announced fingerprint; on a mismatch nothing is sent. Devices that announce
+  plain HTTP are not offered as targets (nothing could be pinned) unless
+  `allow_http_send` is on.
+- **Verified devices.** A device counts as verified only after this plugin
+  connected to it over HTTPS and saw the certificate matching its
+  fingerprint. Only verified devices get the *trusted* badge and the *Trust
+  device* action; an announcement, register or upload request alone never
+  replaces or evicts a verified device, so a LAN attacker announcing a
+  trusted device's fingerprint with `protocol: "http"` gets neither the badge
+  nor the files. The first contact is
   trust-on-first-use: anyone on your LAN can announce a name like "Joshua's
   iPhone", so check the device before you trust it.
 - **No overwrites, no escapes.** File names from the sender are cleaned

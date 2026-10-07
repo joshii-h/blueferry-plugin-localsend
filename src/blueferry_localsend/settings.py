@@ -53,6 +53,8 @@ class Settings:
     require_pin: bool = False
     auto_accept_trusted: bool = False
     http_scan: bool = False
+    # Plain HTTP pins no certificate: anyone on the LAN can claim the device.
+    allow_http_send: bool = False
     # fingerprint (uppercase hex) -> alias at the time it was trusted
     trusted: dict[str, str] = field(default_factory=dict)
 
@@ -181,5 +183,6 @@ def _from_dict(raw: dict) -> Settings:
         require_pin=pick("require_pin", bool),
         auto_accept_trusted=pick("auto_accept_trusted", bool),
         http_scan=pick("http_scan", bool),
+        allow_http_send=pick("allow_http_send", bool),
         trusted=dict(list(trusted.items())[:MAX_TRUSTED]),
     )

@@ -287,9 +287,7 @@ class LocalSendService(SurfacesService):
         if self._registry.seen(info, source):
             self.emit_card_changed()
         if wants_answer and self._settings().visible:
-            threading.Thread(
-                target=self._answer, args=(info, source), name="localsend-answer", daemon=True,
-            ).start()
+            self._background(self._answer, info, source)
 
     def _answer(self, info: DeviceInfo, source: str) -> None:
         peer = Peer(source, info.port, info.protocol, info.fingerprint)
@@ -301,11 +299,27 @@ class LocalSendService(SurfacesService):
             return
         # The answer's fingerprint is "ignored in HTTPS mode"; the one we
         # pinned while connecting (from the announcement) identifies it.
-        self._registry.seen(replace(answer, fingerprint=info.fingerprint), source)
+        # Over HTTPS that pin is the proof; plain HTTP proves nothing.
+        verified = peer.protocol == "https"
+        if self._registry.seen(replace(answer, fingerprint=info.fingerprint), source,
+                               verified=verified):
+            self.emit_card_changed()
 
     def _on_register(self, info: DeviceInfo, address: str) -> None:
         if self._registry.seen(info, address):
             self.emit_card_changed()
+        known = self._registry.by_fingerprint(info.fingerprint)
+        if info.protocol == "https" and known is not None and not known.verified:
+            self._background(self._verify, info, address)
+
+    def _verify(self, info: DeviceInfo, address: str) -> None:
+        """Connect back and check the certificate a register claimed."""
+        if self.peer_client.verify_peer(Peer(address, info.port, "https", info.fingerprint)):
+            if self._registry.seen(info, address, verified=True):
+                self.emit_card_changed()
+
+    def _background(self, work: Callable[..., None], *args: Any) -> None:
+        threading.Thread(target=work, args=args, name="localsend-answer", daemon=True).start()
 
     def refresh_devices(self) -> None:
         """Announce (if visible) and give peers a moment to answer."""
@@ -334,11 +348,12 @@ class LocalSendService(SurfacesService):
             for protocol in ("https", "http"):
                 try:
                     # The fingerprint is unknown; only a reachable LocalSend
-                    # answers, and sending later pins the certificate it shows.
+                    # answers. Over HTTPS the fingerprint recorded is the one
+                    # of the certificate it showed, so that entry is verified.
                     info = self._probe(address, protocol, me)
                 except PeerError:
                     continue
-                self._registry.seen(info, address)
+                self._registry.seen(info, address, verified=protocol == "https")
                 return
 
         with ThreadPoolExecutor(max_workers=32) as pool:
@@ -443,18 +458,24 @@ class LocalSendService(SurfacesService):
 
     # ---- sending ---------------------------------------------------------
 
+    def _sendable(self, device: Device) -> bool:
+        """HTTPS pins the receiver's certificate; plain HTTP is opt-in."""
+        return device.info.protocol == "https" or self._settings().allow_http_send
+
     def share_targets(self) -> list[ShareTarget]:
         self.refresh_devices()
         return [
             ShareTarget(d.target_id, t("target_label", name=d.info.alias),
                         _DEVICE_ICONS.get(d.info.device_type, "computer"))
-            for d in self._registry.active()
+            for d in self._registry.active() if self._sendable(d)
         ]
 
     def send_files(self, target_id: str, paths: list[str]) -> dict:
         device = self._registry.by_target(target_id)
         if device is None:
             return {"ok": False, "message": t("unknown_target"), "job": None}
+        if not self._sendable(device):
+            return {"ok": False, "message": t("insecure_target"), "job": None}
         chosen: list[Path] = []
         for raw in paths:
             path = Path(raw)
@@ -481,6 +502,8 @@ class LocalSendService(SurfacesService):
         peer = Peer(job.device.address, info.port, info.protocol, info.fingerprint)
         client = self.peer_client
         try:
+            if not self._sendable(job.device):
+                raise PeerError("insecure")
             offers: dict[str, dict] = {}
             by_id: dict[str, Path] = {}
             for path in job.paths:
@@ -592,13 +615,21 @@ class LocalSendService(SurfacesService):
             details = [t("devices")]
             if device.info.device_model:
                 details.append(device.info.device_model)
-            if trusted:
+            # The badge and "Trust device" only for a certificate this plugin
+            # checked itself; an announcement alone may be spoofed.
+            if not device.verified:
+                details.append(t("unverified"))
+                actions: tuple[Action, ...] = (
+                    (Action("untrust", t("untrust"), "security-low"),) if trusted else ()
+                )
+            elif trusted:
                 details.append(t("trusted"))
-            action = (Action("untrust", t("untrust"), "security-low") if trusted
-                      else Action("trust", t("trust"), "security-high"))
+                actions = (Action("untrust", t("untrust"), "security-low"),)
+            else:
+                actions = (Action("trust", t("trust"), "security-high"),)
             items.append(CardItem(
                 f"dev-{device.target_id}", _DEVICE_ICONS.get(device.info.device_type, "computer"),
-                device.info.alias, " · ".join(details), (action,),
+                device.info.alias, " · ".join(details), actions,
             ))
         return items
 
@@ -647,6 +678,8 @@ class LocalSendService(SurfacesService):
                 return action_result(False, t("unknown_target"))
             try:
                 if action_id == "trust":
+                    if not device.verified:
+                        return action_result(False, t("not_verified"))
                     self._store.trust(device.info.fingerprint, device.info.alias)
                     message = t("trusted_now", name=device.info.alias)
                 else:
@@ -700,6 +733,7 @@ class LocalSendService(SurfacesService):
             "port": settings.port,
             "interfaces": settings.interfaces,
             "http_scan": settings.http_scan,
+            "allow_http_send": settings.allow_http_send,
         }
 
     def apply_config(self, values: dict[str, object]) -> None:
@@ -734,6 +768,7 @@ class LocalSendService(SurfacesService):
             port=int(values.get("port", current.port)),  # type: ignore[arg-type]
             interfaces=", ".join(names),
             http_scan=bool(values.get("http_scan", current.http_scan)),
+            allow_http_send=bool(values.get("allow_http_send", current.allow_http_send)),
         )
         try:
             self._store.save(updated)

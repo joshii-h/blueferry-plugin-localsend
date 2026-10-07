@@ -193,6 +193,8 @@ def test_trusted_device_is_accepted_without_asking(tmp_path, plugins) -> None:
     alice, alice_host = plugins("alice")
     bob, bob_host = plugins("bob", settings=Settings(auto_accept_trusted=True))
     _wait(lambda: alice._registry.active() and bob._registry.active())
+    # Alice registered with bob; bob checks her certificate in the background.
+    _wait(lambda: bob._registry.active()[0].verified)
     device_item = bob_host.item("dev-")
     assert device_item["title"] == "alice"
     assert bob_host.invoke(device_item["id"], "trust")["ok"] is True
@@ -237,6 +239,51 @@ def test_sender_pins_the_receivers_certificate(tmp_path, plugins) -> None:
     assert bob_host.notifications == []
 
 
+def _spoofed_announcement(fingerprint: str, port: int) -> bytes:
+    return json.dumps({
+        "alias": "bob", "version": "2.2", "deviceModel": "Linux", "deviceType": "desktop",
+        "fingerprint": fingerprint, "port": port, "protocol": "http", "announce": False,
+    }).encode()
+
+
+def test_a_spoofed_http_announcement_cannot_take_over_a_verified_device(
+    tmp_path, plugins,
+) -> None:
+    alice, alice_host = plugins("alice")
+    bob, _bob_host = plugins("bob")
+    _wait(lambda: alice._registry.active() and alice._registry.active()[0].verified)
+    genuine = alice._registry.active()[0]
+    assert genuine.info.protocol == "https"
+    # An attacker on the LAN announces bob's fingerprint with plain HTTP.
+    alice._on_datagram(_spoofed_announcement(bob.identity().fingerprint, 9), "127.0.0.9")
+    device = alice._registry.by_fingerprint(bob.identity().fingerprint)
+    assert device.verified and device.address == genuine.address
+    assert device.info.protocol == "https" and device.info.port == genuine.info.port
+    # The badge still belongs to the genuine device only.
+    alice._store.trust(bob.identity().fingerprint, "bob")
+    assert "trusted" in alice_host.item("dev-")["subtitle"]
+
+
+def test_unverified_http_devices_get_no_badge_and_no_files(tmp_path, plugins) -> None:
+    alice, alice_host = plugins("alice")
+    fingerprint = "AB" * 32
+    alice._store.trust(fingerprint, "iPhone")
+    alice._on_datagram(_spoofed_announcement(fingerprint, 9), "127.0.0.9")
+    item = alice_host.item("dev-")
+    assert "trusted" not in item["subtitle"] and "not verified" in item["subtitle"]
+    assert [a["id"] for a in item["actions"]] == ["untrust"]
+    assert alice_host.share_targets() == []
+    target = alice._registry.by_fingerprint(fingerprint).target_id
+    answer = alice_host.send_files(target, [str(_files(tmp_path)[1])])
+    assert answer["ok"] is False and "unencrypted" in answer["message"]
+    # Trusting needs a certificate this plugin checked itself.
+    alice._store.untrust(fingerprint)
+    assert alice_host.invoke(item["id"], "trust")["ok"] is False
+    # Only an explicit setting allows plain HTTP.
+    alice._store.save(replace(alice._store.load(), allow_http_send=True))
+    assert [t["id"] for t in alice_host.share_targets()] == [target]
+
+
 def test_server_refuses_addresses_outside_the_lan(tmp_path, plugins) -> None:
     bob, _host = plugins("bob")
     bob._active_interfaces = [Interface("wlp7s0", "192.168.1.95", "255.255.255.0")]
@@ -264,8 +311,9 @@ def test_card_and_notification_text_in_german(tmp_path, plugins, monkeypatch) ->
     assert [a["label"] for a in items[0]["actions"]] == ["Annehmen", "Ablehnen"]
     assert items[-1]["title"] == "Letzte Übertragungen"
     assert items[-1]["actions"][0]["label"] == "Ordner öffnen"
-    assert any(i["title"] == "iPhone" and i["actions"][0]["label"] == "Gerät vertrauen"
-               for i in items)
+    # The request only claims its fingerprint: no "Trust device" before a check.
+    assert any(i["title"] == "iPhone" and "nicht geprüft" in i["subtitle"]
+               and not i["actions"] for i in items)
     bob_host.invoke(items[0]["id"], "reject")
     worker.join(timeout=5)
 

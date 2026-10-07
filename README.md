@@ -8,8 +8,9 @@ the [LocalSend protocol v2](https://github.com/localsend/protocol) itself.
 Your iPhone (or any device running LocalSend) sees this computer as a
 LocalSend device, and BlueFerry can send files to it. It runs as its own
 process on the session bus and talks to BlueFerry only through
-`blueferry.plugin_api` (plugin API 1.2: capabilities `card`, `share` and
-`notify`; see `PLUGINS.md` in the BlueFerry repository).
+`blueferry.plugin_api` (plugin API 1.3: capabilities `card`, `share` and
+`notify`, a guided settings form with "Test connection"; see `PLUGINS.md`
+in the BlueFerry repository).
 
 > **On the iPhone, LocalSend must be open (in the foreground) to receive.**
 > iOS suspends the app in the background, so it neither announces itself nor
@@ -54,7 +55,8 @@ blueferry plugins install https://github.com/joshii-h/blueferry-plugin-localsend
 
 or pick "LocalSend" in BlueFerry's settings, Plugins. BlueFerry shows source,
 version, capabilities and the command it will run, and installs only after
-you confirm. This plugin needs a BlueFerry with plugin API 1.2.
+you confirm. This plugin needs a BlueFerry with plugin API 1.3 (0.8.1 or
+newer from the branch with guided settings).
 
 BlueFerry starts plugins on first use. To be reachable right after login,
 also start the receiver with the session:
@@ -77,7 +79,7 @@ In BlueFerry's settings, Plugins > LocalSend > Settings, or
 | `download_dir` | Target folder; empty uses `~/Downloads/iPhone`. |
 | `max_size_mb` | Requests above this total size are declined (default 4096). |
 | `auto_accept_trusted` | Accept devices marked with *Trust device* without asking. |
-| `require_pin`, `pin` | Senders must enter this PIN (4 to 12 digits). |
+| `require_pin`, `pin` | Senders must enter this PIN (4 to 12 digits); the PIN field shows only while `require_pin` is on. |
 | `port` | TCP and UDP port (default 53317, like LocalSend). |
 | `interfaces` | Comma-separated interface names; empty picks the LAN automatically. |
 | `http_scan` | Legacy subnet scan when multicast finds nothing. |
@@ -87,6 +89,13 @@ In BlueFerry's settings, Plugins > LocalSend > Settings, or
 fingerprint, the interfaces in use and the folder;
 `blueferry plugins localsend trusted [--remove FINGERPRINT]` lists or removes
 trusted devices.
+
+The form groups the settings into Options, Security and Advanced (folded).
+**Test connection** checks without saving that a LAN interface is usable,
+that the port is free (or already this plugin's: another LocalSend app on
+53317 is the usual culprit) and lists the devices it finds, e.g. "Ready on
+wlp7s0, port 53317. 1 device(s) found: iPhone." Device names appear only in
+that answer, never in the log.
 
 ## Security
 
@@ -123,8 +132,9 @@ trusted devices.
   announced per file is enforced while receiving, a SHA-256 sent along is
   verified, and the total is limited by `max_size_mb` and free disk space.
 - **Limits.** One session at a time, ten upload requests and twenty
-  registrations per minute per address, 32 connections and at most two per
-  address. Every request has a total deadline (30 s for the request line,
+  registrations per minute per address, 32 connections and at most four per
+  address (a sending phone keeps idle keep-alive connections from discovery
+  and the earlier requests, runs the upload on one and cancels on another). Every request has a total deadline (30 s for the request line,
   headers and JSON bodies; uploads get 60 s plus one second per 16 KiB), so a
   client trickling bytes cannot hold a connection open. Card updates caused by discovery are sent at most once a second.
 - **Secrets.** The private key and the settings (including the PIN) are in
@@ -145,7 +155,7 @@ python3 -m venv --system-site-packages .venv   # dbus-python, PyGObject from the
 
 The tests run two plugin instances against each other over HTTPS on
 localhost, with an in-memory multicast bus and a fake BlueFerry core
-(`tests/fakehost.py`) that checks every reply against the plugin API 1.2
+(`tests/fakehost.py`) that checks every reply against the plugin API 1.3
 limits. They use the JSON examples of the LocalSend spec and LocalSend's own
 certificate test vector. Compatibility with the real LocalSend apps has not
 been tested yet.

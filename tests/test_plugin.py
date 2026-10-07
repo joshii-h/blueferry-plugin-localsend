@@ -75,6 +75,8 @@ def plugins(tmp_path, manifest):
     bus = MulticastBus()
     made: list[LocalSendService] = []
     opened: list[str] = []
+    revealed: list[list[str]] = []
+    copied: list[str] = []
 
     def make(name: str, **kwargs) -> tuple[LocalSendService, FakeHost]:
         store = SettingsStore(tmp_path / name / "config")
@@ -84,7 +86,11 @@ def plugins(tmp_path, manifest):
         service = inline_service(
             LocalSendService, manifest, settings=store,
             interfaces=lambda names: [LOOPBACK], multicast=bus.member(), port=0,
-            opener=lambda uri: opened.append(uri) or True, discovery_wait=0.0, **kwargs,
+            opener=lambda uri: opened.append(uri) or True, discovery_wait=0.0,
+            **{"own_addresses": lambda: (), "probe_interval": None,
+               "reveal": lambda uris: revealed.append(list(uris)) or True,
+               "clipboard": lambda text: copied.append(text) or True,
+               "autostart_home": tmp_path / name / "xdg-config", **kwargs},
         )
         host = FakeHost(service)
         service.start()
@@ -92,6 +98,8 @@ def plugins(tmp_path, manifest):
         return service, host
 
     make.opened = opened
+    make.revealed = revealed
+    make.copied = copied
     yield make
     for service in made:
         service.stop()
@@ -153,10 +161,15 @@ def test_roundtrip_between_two_instances(tmp_path, plugins) -> None:
     assert "Sent 3 files to bob" in recent["subtitle"]
     assert bob_host.card_changed > 0 and alice_host.card_changed > 0
 
-    # "Open folder" opens the download folder itself (not via open_uri).
+    # "Open folder" shows the files just received, selected in the file
+    # manager (not via open_uri: the core opens only its plugin cache).
     result = bob_host.invoke("recent", "open-folder")
     assert result == {"ok": True, "message": None, "open_uri": None}
-    assert plugins.opened == [inbox.resolve().as_uri()]
+    assert sorted(plugins.revealed[-1]) == sorted(
+        (inbox / p.name).resolve().as_uri() for p in paths)
+    assert plugins.opened == []
+    # Alice hears that it went through.
+    assert alice_host.notifications[-1][1] == "Sent 3 files to bob (300 KB)"
 
     # A second transfer of the same names does not overwrite.
     alice_host.send_files(targets[0]["id"], [str(paths[1])])
@@ -191,14 +204,19 @@ def test_decline_button_on_the_card(tmp_path, plugins) -> None:
 
 def test_trusted_device_is_accepted_without_asking(tmp_path, plugins) -> None:
     alice, alice_host = plugins("alice")
-    bob, bob_host = plugins("bob", settings=Settings(auto_accept_trusted=True))
+    bob, bob_host = plugins("bob")
     _wait(lambda: alice._registry.active() and bob._registry.active())
     # Alice registered with bob; bob checks her certificate in the background.
     _wait(lambda: bob._registry.active()[0].verified)
     device_item = bob_host.item("dev-")
     assert device_item["title"] == "alice"
-    assert bob_host.invoke(device_item["id"], "trust")["ok"] is True
-    assert "trusted" in bob_host.item("dev-")["subtitle"]
+    assert [a["label"] for a in device_item["actions"]] == ["Send files…", "Always accept"]
+    answer = bob_host.invoke(device_item["id"], "trust")
+    assert answer["ok"] is True and "without asking" in answer["message"]
+    assert "accepts without asking" in bob_host.item("dev-")["subtitle"]
+    # The click is the consent: the switch for it is on now.
+    assert bob._store.load().auto_accept_trusted is True
+    assert [a["id"] for a in bob_host.item("dev-")["actions"]] == ["send", "untrust"]
 
     alice_host.send_files(alice_host.share_targets()[0]["id"], [str(_files(tmp_path)[1])])
     _wait(lambda: alice._recent)
@@ -261,7 +279,7 @@ def test_a_spoofed_http_announcement_cannot_take_over_a_verified_device(
     assert device.info.protocol == "https" and device.info.port == genuine.info.port
     # The badge still belongs to the genuine device only.
     alice._store.trust(bob.identity().fingerprint, "bob")
-    assert "trusted" in alice_host.item("dev-")["subtitle"]
+    assert "accepts without asking" in alice_host.item("dev-")["subtitle"]
 
 
 def test_unverified_http_devices_get_no_badge_and_no_files(tmp_path, plugins) -> None:
@@ -270,8 +288,8 @@ def test_unverified_http_devices_get_no_badge_and_no_files(tmp_path, plugins) ->
     alice._store.trust(fingerprint, "iPhone")
     alice._on_datagram(_spoofed_announcement(fingerprint, 9), "127.0.0.9")
     item = alice_host.item("dev-")
-    assert "trusted" not in item["subtitle"] and "not verified" in item["subtitle"]
-    assert [a["id"] for a in item["actions"]] == ["untrust"]
+    assert "without asking" not in item["subtitle"] and "unencrypted" in item["subtitle"]
+    assert [a["id"] for a in item["actions"]] == ["untrust"]  # nothing to send there
     assert alice_host.share_targets() == []
     target = alice._registry.by_fingerprint(fingerprint).target_id
     answer = alice_host.send_files(target, [str(_files(tmp_path)[1])])
@@ -311,9 +329,10 @@ def test_card_and_notification_text_in_german(tmp_path, plugins, monkeypatch) ->
     assert [a["label"] for a in items[0]["actions"]] == ["Annehmen", "Ablehnen"]
     assert items[-1]["title"] == "Letzte Übertragungen"
     assert items[-1]["actions"][0]["label"] == "Ordner öffnen"
-    # The request only claims its fingerprint: no "Trust device" before a check.
+    # The request only claims its fingerprint: no "Always accept" before a
+    # check, but sending is offered (the connection checks the certificate).
     assert any(i["title"] == "iPhone" and "nicht geprüft" in i["subtitle"]
-               and not i["actions"] for i in items)
+               and [a["label"] for a in i["actions"]] == ["Dateien senden…"] for i in items)
     bob_host.invoke(items[0]["id"], "reject")
     worker.join(timeout=5)
 
@@ -329,7 +348,8 @@ def test_hidden_plugin_does_not_announce(tmp_path, plugins) -> None:
 
 def test_manifest_declares_the_surfaces_and_settings(manifest) -> None:
     assert manifest.id == PLUGIN_ID
-    assert manifest.api_version == 1 and manifest.api_minor == 3
+    assert manifest.api_version == 1 and manifest.api_minor == 4
+    assert manifest.replaces_tools == ("localsend",)
     assert manifest.config_test is True and manifest.config_login == ""
     assert manifest.min_blueferry == "0.8.1"
     assert set(manifest.capabilities) == {"card", "share", "notify"}

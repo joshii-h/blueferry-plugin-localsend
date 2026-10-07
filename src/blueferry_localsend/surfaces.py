@@ -1,4 +1,4 @@
-"""Plugin1 v1.2 surfaces: the ``card``, ``share`` and ``notify`` capabilities.
+"""Plugin1 surfaces (API 1.2, ``send_to`` from 1.4): ``card``, ``share``, ``notify``.
 
 Implemented strictly from the shared spec (PLUGIN-SURFACES-v1.2): plugins
 never ship UI, they hand the core JSON and content-free signals.
@@ -42,10 +42,16 @@ class Action:
     label: str
     icon: str | None = None
     kind: str = "button"  # "button" | "primary"
+    # Plugin API 1.4: a share target; BlueFerry asks for files and calls
+    # SendFiles(send_to, paths) instead of InvokeAction.
+    send_to: str | None = None
 
     def to_json(self) -> dict:
-        return {"id": self.id, "label": clip(self.label, MAX_LABEL), "icon": self.icon,
+        data = {"id": self.id, "label": clip(self.label, MAX_LABEL), "icon": self.icon,
                 "kind": self.kind}
+        if self.send_to:
+            data["send_to"] = self.send_to
+        return data
 
 
 @dataclass(frozen=True, slots=True)

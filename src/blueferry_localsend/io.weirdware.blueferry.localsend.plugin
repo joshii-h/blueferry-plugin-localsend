@@ -1,8 +1,8 @@
 [BlueFerry Plugin]
 Id=io.weirdware.blueferry.localsend
 Name=LocalSend
-Version=0.2.0
-ApiVersion=1.3
+Version=0.3.0
+ApiVersion=1.4
 MinBlueFerry=0.8.1
 Capabilities=card;share;notify;
 Homepage=https://github.com/joshii-h/blueferry-plugin-localsend
@@ -11,13 +11,14 @@ Exec=blueferry-localsend serve
 Cli=blueferry-localsend
 Alias=localsend
 ConfigTest=true
+ReplacesTools=localsend;
 
 [ConfigGroup options]
-Help=Open LocalSend on the iPhone; this computer shows up there while both are on the same network.
+Help=Open LocalSend on the iPhone; this computer shows up there while both are on the same network. To send, choose "Send files…" on a device in the phone card or drop files on it.
 
 [ConfigGroup security]
 Label=Security
-Help=Who may send files here without asking, and what this computer sends unencrypted.
+Help="Verified" means this computer connected to the device and its certificate matched what it announced. "Always accept" on a verified device lets its files in without asking.
 
 [ConfigGroup advanced]
 Help=Only needed when the iPhone does not find this computer.
@@ -35,6 +36,13 @@ Type=bool
 Default=true
 Group=options
 Help=Answer LocalSend devices on the network; off means no receiving
+
+[Config autostart]
+Label=Start at login
+Type=bool
+Default=false
+Group=options
+Help=Ready to receive right after login. Off: receiving starts once BlueFerry first shows the phone card.
 
 [Config download_dir]
 Label=Download folder
@@ -54,11 +62,11 @@ ErrorText=Use 1 to 1048576 MB.
 Help=Requests above this total size are declined
 
 [Config auto_accept_trusted]
-Label=Accept trusted devices automatically
+Label=Accept "Always accept" devices without asking
 Type=bool
 Default=false
 Group=security
-Help=Only devices marked with "Trust device" whose certificate matches
+Help=Turned on by "Always accept" on a device; off asks for every transfer again. A device must still show the same certificate.
 
 [Config require_pin]
 Label=Require PIN

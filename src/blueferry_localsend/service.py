@@ -2,8 +2,11 @@
 
 Threads: the GLib main loop (D-Bus), one HTTPS server thread per LAN
 address plus one thread per connection, the multicast reader, a small
-pool answering announcements, and one thread per outgoing transfer. D-Bus
-signals are always emitted through ``self._to_main``.
+pool answering announcements, one thread per outgoing transfer and the
+watcher that probes known devices every 20 seconds (are they still there,
+is their certificate the announced one) and binds the port again once
+another LocalSend let go of it. D-Bus signals are always emitted through
+``self._to_main``.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ import subprocess  # nosec B404 - only xdg-open with a file:// URI, no shell
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -31,9 +34,16 @@ from blueferry.plugin_api.config import ConfigError
 from blueferry.plugin_api.config_flow import ConfigTestResult
 from blueferry.plugin_api.manifest import PluginManifest
 from blueferry.plugin_api.service import PluginCallError
+from blueferry_plugin_kit.clipboard import Clipboard
 from blueferry_plugin_kit.lanserver import ServerGroup
-from blueferry_plugin_kit.netaddr import Interface, lan_interfaces, parse_interface_list
+from blueferry_plugin_kit.netaddr import (
+    Interface,
+    lan_interfaces,
+    local_addresses,
+    parse_interface_list,
+)
 
+from blueferry_localsend import autostart
 from blueferry_localsend import files as fs
 from blueferry_localsend.client import Peer, PeerClient, PeerError
 from blueferry_localsend.discovery import Device, DeviceRegistry, MulticastTransport, UdpMulticast
@@ -76,6 +86,10 @@ DISCOVERY_WAIT = 1.0
 MAX_RECENT = 10
 MAX_PENDING_SHOWN = 2
 MAX_DEVICES_SHOWN = 3
+MAX_MESSAGES = 3
+MAX_ITEMS_ON_CARD = 8
+# Devices quiet for this long are probed; the watcher wakes up as often.
+PROBE_INTERVAL = 20.0
 CARD_SIGNAL_INTERVAL = 1.0
 ANSWER_WORKERS = 4
 MAX_ANSWERS_QUEUED = 16
@@ -105,6 +119,16 @@ class SendJob:
     reason: str = ""
     session: str = ""
     cancelled: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    """A text sent with LocalSend's "Text"; shown on the card, never logged."""
+
+    id: str
+    sender: str
+    text: str
+    when: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +162,37 @@ def open_with_desktop(uri: str) -> bool:
     return True
 
 
+def reveal_in_file_manager(uris: list[str]) -> bool:
+    """Show files selected in the file manager (FileManager1.ShowItems)."""
+    try:
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync(
+            "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1", "ShowItems",
+            GLib.Variant("(ass)", (uris, "")), None, Gio.DBusCallFlags.NONE, 5000, None,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def copy_text(text: str) -> bool:
+    return Clipboard().copy_text(text)
+
+
 def _system_interfaces(names: list[str]) -> list[Interface]:
     return lan_interfaces(names)
+
+
+def _is_web_link(text: str) -> bool:
+    stripped = text.strip()
+    return (len(stripped) <= 2048 and " " not in stripped and "\n" not in stripped
+            and re.match(r"^https?://[^\s/]+", stripped) is not None)
 
 
 class LocalSendService(SurfacesService):
@@ -155,6 +208,11 @@ class LocalSendService(SurfacesService):
         decision_timeout: float = DECISION_TIMEOUT,
         discovery_wait: float = DISCOVERY_WAIT,
         opener: Callable[[str], bool] = open_with_desktop,
+        reveal: Callable[[list[str]], bool] = reveal_in_file_manager,
+        clipboard: Callable[[str], bool] = copy_text,
+        own_addresses: Callable[[], Iterable[str]] = local_addresses,
+        probe_interval: float | None = PROBE_INTERVAL,
+        autostart_home: Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(manifest, bus, **kwargs)
@@ -165,10 +223,19 @@ class LocalSendService(SurfacesService):
         self._decision_timeout = decision_timeout
         self._discovery_wait = discovery_wait
         self._opener = opener
+        self._reveal = reveal
+        self._copy = clipboard
+        self._probe_interval = probe_interval
+        self._autostart_home = autostart_home
+        self._watcher: threading.Thread | None = None
+        self._stopping = threading.Event()
         self._lock = threading.RLock()
         self._identity: Identity | None = None
         self._client: PeerClient | None = None
-        self._registry = DeviceRegistry()
+        self._registry = DeviceRegistry(own_addresses=own_addresses)
+        self._messages: deque[Message] = deque(maxlen=MAX_MESSAGES)
+        self._last_received: list[Path] = []
+        self._port_busy = False
         # The per-address cap is shared by all servers, so a client cannot
         # multiply its share by using every address.
         self._servers = ServerGroup(
@@ -190,6 +257,7 @@ class LocalSendService(SurfacesService):
         self.receiver = Receiver(
             me=self.me, policy=self._policy, decide=self._decide,
             on_register=self._on_register, on_change=self._on_session_change,
+            on_message=self._on_message,
         )
 
     # ---- lifecycle -------------------------------------------------------
@@ -232,6 +300,17 @@ class LocalSendService(SurfacesService):
             self._problem = t("no_interface")
             log.warning("no LAN interface to use")
             return
+        self._bind(identity, interfaces, port)
+        try:
+            self._multicast.start(interfaces, self.port, self._on_datagram)
+        except OSError as error:
+            log.warning("multicast unavailable: %s", error.strerror)
+        if settings.visible:
+            self.announce()
+        log.info("LocalSend ready on %d address(es)", len(self._servers.servers))
+        self._start_watcher()
+
+    def _bind(self, identity: Identity, interfaces: list[Interface], port: int) -> None:
         addresses = list(dict.fromkeys(i.address for i in interfaces))
         context = identity.server_context()
         failed = self._servers.start(
@@ -240,16 +319,79 @@ class LocalSendService(SurfacesService):
                 address, self.receiver, context, self.allowed, per_address,
             ),
         )
-        self._problem = f"port {port} busy on " + ", ".join(failed) if failed else ""
-        try:
-            self._multicast.start(interfaces, self.port, self._on_datagram)
-        except OSError as error:
-            log.warning("multicast unavailable: %s", error.strerror)
-        if settings.visible:
-            self.announce()
-        log.info("LocalSend ready on %d address(es)", len(self._servers.servers))
+        self._port_busy = bool(failed)
+        if failed:
+            # Most often the LocalSend app on this computer holds the port.
+            log.warning("port %d busy on %d address(es)", port, len(failed))
+            self._problem = t("problem_port", port=port)
+        else:
+            self._problem = ""
+
+    def rebind(self) -> bool:
+        """Try the port again (another LocalSend may have quit); True if bound."""
+        with self._lock:
+            interfaces = list(self._active_interfaces)
+        if not interfaces or self._identity is None:
+            return False
+        settings = self._settings()
+        port = settings.port if self._port_override is None else self._port_override
+        self._servers.stop()
+        self._bind(self._identity, interfaces, port)
+        if not self._port_busy:
+            log.info("port free again; receiving")
+            self.emit_card_changed()
+        return not self._port_busy
+
+    # ---- watching the devices --------------------------------------------
+
+    def _start_watcher(self) -> None:
+        if self._probe_interval is None or (self._watcher and self._watcher.is_alive()):
+            return
+        self._stopping.clear()
+        self._watcher = threading.Thread(
+            target=self._watch, name="localsend-watch", daemon=True,
+        )
+        self._watcher.start()
+
+    def _watch(self) -> None:
+        interval = float(self._probe_interval or PROBE_INTERVAL)
+        while not self._stopping.wait(interval):
+            try:
+                self.check_devices(interval)
+            except Exception:  # the watcher must survive one bad round
+                log.exception("checking the devices failed")
+
+    def check_devices(self, quiet_for: float = PROBE_INTERVAL) -> None:
+        """One round: probe devices quiet for ``quiet_for`` seconds, forget
+        the ones gone for long, and bind the port again if it was busy.
+
+        A probe is a TLS connection that checks the announced certificate
+        (over HTTPS), so it also verifies devices that only announced.
+        """
+        if self._port_busy:
+            self.rebind()
+        changed = self._registry.expire()
+        quiet = self._registry.quiet_since(quiet_for)
+        if quiet:
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="localsend-probe") as pool:
+                results = list(pool.map(self._probe_device, quiet))
+            changed = any(results) or changed
+        if changed:
+            self._throttled_card_changed()
+
+    def _probe_device(self, device: Device) -> bool:
+        info = device.info
+        peer = Peer(device.address, info.port, info.protocol, info.fingerprint)
+        if self.peer_client.verify_peer(peer):
+            return self._registry.answered(info.fingerprint, device.address,
+                                           verified=info.protocol == "https")
+        return self._registry.unreachable(info.fingerprint, device.address)
 
     def stop(self) -> None:
+        self._stopping.set()
+        if self._watcher is not None and self._watcher is not threading.current_thread():
+            self._watcher.join(timeout=2)
+        self._watcher = None
         self._multicast.stop()
         self._servers.stop()
         for pending in list(self._pending.values()):
@@ -315,6 +457,11 @@ class LocalSendService(SurfacesService):
             self._throttled_card_changed()
         if wants_answer and self._settings().visible:
             self._background(source, self._answer, info, source)
+            return
+        known = self._registry.by_fingerprint(info.fingerprint)
+        if info.protocol == "https" and known is not None and not known.verified:
+            # An answer to our announcement: check its certificate right away.
+            self._background(source, self._verify, info, source)
 
     def _answer(self, info: DeviceInfo, source: str) -> None:
         peer = Peer(source, info.port, info.protocol, info.fingerprint)
@@ -481,9 +628,36 @@ class LocalSendService(SurfacesService):
         pending.event.set()
         return True
 
+    def _on_message(self, request: UploadRequest, address: str) -> None:
+        """A text from LocalSend's "Text": keep it for the card, pop up."""
+        text = request.message or ""
+        self._registry.seen(request.info, address)
+        message = Message(secrets.token_hex(6), request.info.alias, text, time.time())
+        with self._lock:
+            self._messages.appendleft(message)
+        log.info("message received (%d characters)", len(text))
+        # The text stays off the session bus; the card fetches it.
+        self.emit_notify(t("localsend"), t("message_from", name=request.info.alias),
+                         "mail-message-new", t("copy"), f"copy-{message.id}")
+        self.emit_card_changed()
+
+    def _message(self, message_id: str) -> Message | None:
+        with self._lock:
+            return next((m for m in self._messages if m.id == message_id), None)
+
+    def _copy_message(self, message_id: str) -> str:
+        message = self._message(message_id)
+        if message is None:
+            return action_result(False, t("gone"))
+        if not self._copy(message.text):
+            return action_result(False, t("copy_failed"))
+        return action_result(True, t("copied"))
+
     def _on_session_change(self, session: Session) -> None:
         if session.finished and session.id not in self._recorded:
             self._recorded.add(session.id)
+            if session.done:
+                self._last_received = list(session.done.values())
             size = sum(o.size for o in session.request.files if o.id in session.done)
             transfer = Transfer("in", session.request.info.alias, len(session.done), size,
                                 time.time(), not session.failed)
@@ -587,6 +761,10 @@ class LocalSendService(SurfacesService):
                 }
                 by_id[file_id] = path
             answer = client.prepare_upload(peer, self.me(), offers)
+            # The connection pinned the announced certificate: verified now.
+            if self._registry.answered(info.fingerprint, job.device.address,
+                                       verified=info.protocol == "https"):
+                self._throttled_card_changed()
             if answer is None:
                 job.state = "done"
                 return
@@ -610,6 +788,8 @@ class LocalSendService(SurfacesService):
             job.state, job.reason = "failed", error.token
             if job.session:
                 client.cancel(peer, job.session)
+            if error.token == "network":
+                self._registry.unreachable(info.fingerprint, job.device.address)
             log.info("sending failed: %s", error.token)
         except OSError as error:
             job.state, job.reason = "failed", "error"
@@ -618,7 +798,13 @@ class LocalSendService(SurfacesService):
             ok = job.state == "done"
             self._recent.appendleft(Transfer("out", info.alias, len(job.paths), job.total,
                                              time.time(), ok, job.reason))
-            if not ok and job.reason != "cancelled":
+            if ok:
+                shown = fs.human_size(job.total, german=german())
+                self.emit_notify(t("localsend"), (
+                    t("sent_one", name=info.alias, size=shown) if len(job.paths) == 1
+                    else t("sent", name=info.alias, count=len(job.paths), size=shown)
+                ), "document-send")
+            elif job.reason != "cancelled":
                 self.emit_notify(t("localsend"), t("failed_send", name=info.alias,
                                  reason=t(f"reason_{job.reason}")), "dialog-error")
             self.emit_card_changed()
@@ -626,11 +812,20 @@ class LocalSendService(SurfacesService):
     # ---- card ------------------------------------------------------------
 
     def card_items(self) -> list[CardItem]:
+        """Problems first, then what waits for the user, what runs, the
+        devices (each with "Send files…") and the recent transfers."""
         items: list[CardItem] = []
         de = german()
         with self._lock:
             pendings = sorted(self._pending.values(), key=lambda p: p.created)
             jobs = [j for j in self._jobs.values() if j.state in ("waiting", "sending")]
+            messages = list(self._messages)
+        if self._problem:
+            items.append(CardItem(
+                "problem", "dialog-warning", t("problem_title"), self._problem,
+                (Action("retry", t("retry"), "view-refresh", "primary"),)
+                if self._port_busy else (),
+            ))
         for pending in pendings[:MAX_PENDING_SHOWN]:
             request = pending.request
             size = fs.human_size(request.total_size, german=de)
@@ -644,6 +839,15 @@ class LocalSendService(SurfacesService):
                 (Action("accept", t("accept"), "dialog-ok", "primary"),
                  Action("reject", t("reject"), "dialog-cancel")),
             ))
+        for message in messages[:1]:
+            actions = [Action("copy", t("copy"), "edit-copy", "primary")]
+            if _is_web_link(message.text):
+                actions.append(Action("open", t("open_link"), "internet-web-browser"))
+            actions.append(Action("dismiss", t("dismiss"), "window-close"))
+            items.append(CardItem(
+                f"msg-{message.id}", "mail-unread", t("message_title", name=message.sender),
+                message.text, tuple(actions),
+            ))
         session = self.receiver.active
         if session is not None:
             items.append(CardItem(
@@ -652,6 +856,7 @@ class LocalSendService(SurfacesService):
                   percent=_percent(session.received, session.total),
                   done=fs.human_size(session.received, german=de),
                   size=fs.human_size(session.total, german=de)),
+                None, (Action("cancel", t("cancel"), "process-stop"),),
             ))
         for job in jobs[:1]:
             if job.state == "waiting":
@@ -663,37 +868,48 @@ class LocalSendService(SurfacesService):
                           size=fs.human_size(job.total, german=de))
             items.append(CardItem(f"job-{job.id}", "document-send", title, None,
                                   (Action("cancel", t("cancel"), "process-stop"),)))
-        items += self._device_items()
+        room = MAX_ITEMS_ON_CARD - len(items) - 1  # keep one row for the transfers
+        items += self._device_items()[:max(1, room)]
         items.append(self._recent_item())
-        return items[:8]
+        return items[:MAX_ITEMS_ON_CARD]
+
+    def _device_state(self, device: Device, trusted: bool) -> str:
+        """One short line: why the device can or cannot get files now."""
+        if not self._sendable(device):
+            return t("state_http_only")
+        if not device.reachable:
+            return t("state_unreachable", model=device.info.device_model or t("a_device"))
+        if trusted and device.verified:
+            return t("trusted")
+        if not device.verified and device.info.protocol == "https":
+            return t("state_unverified")
+        return t("state_ready")
 
     def _device_items(self) -> list[CardItem]:
         settings = self._settings()
         devices = self._registry.active()
         if not devices:
             subtitle = t("no_devices") if settings.visible else t("invisible")
-            return [CardItem("devices", "network-wireless", t("devices"), subtitle)]
+            return [CardItem("devices", "network-wireless", t("no_devices_title"), subtitle,
+                             (Action("search", t("search"), "view-refresh"),))]
         items = []
         for device in devices[:MAX_DEVICES_SHOWN]:
             trusted = settings.is_trusted(device.info.fingerprint)
-            details = [t("devices")]
-            if device.info.device_model:
-                details.append(device.info.device_model)
-            # The badge and "Trust device" only for a certificate this plugin
-            # checked itself; an announcement alone may be spoofed.
-            if not device.verified:
-                details.append(t("unverified"))
-                actions: tuple[Action, ...] = (
-                    (Action("untrust", t("untrust"), "security-low"),) if trusted else ()
-                )
-            elif trusted:
-                details.append(t("trusted"))
-                actions = (Action("untrust", t("untrust"), "security-low"),)
-            else:
-                actions = (Action("trust", t("trust"), "security-high"),)
+            details = [device.info.device_model] if device.info.device_model else []
+            details.append(self._device_state(device, trusted))
+            actions: list[Action] = []
+            if self._sendable(device):
+                actions.append(Action("send", t("send_files"), "document-send", "primary",
+                                      send_to=device.target_id))
+            # "Always accept" only for a certificate this plugin checked
+            # itself; an announcement alone may be spoofed.
+            if trusted:
+                actions.append(Action("untrust", t("untrust"), "security-low"))
+            elif device.verified:
+                actions.append(Action("trust", t("trust"), "security-high"))
             items.append(CardItem(
                 f"dev-{device.target_id}", _DEVICE_ICONS.get(device.info.device_type, "computer"),
-                device.info.alias, " · ".join(details), actions,
+                device.info.alias, " · ".join(details), tuple(actions),
             ))
         return items
 
@@ -724,38 +940,85 @@ class LocalSendService(SurfacesService):
         if item_id == "notify":
             if action_id == "open-folder":
                 return self._open_folder()
+            if action_id.startswith("copy-"):
+                return self._copy_message(action_id[len("copy-"):])
             for prefix, accept in (("accept-", True), ("reject-", False)):
                 if action_id.startswith(prefix):
                     return self._resolve_result(action_id[len(prefix):], accept)
             return action_result(False, "unknown action")
         if item_id.startswith("pending-") and action_id in ("accept", "reject"):
             return self._resolve_result(item_id[len("pending-"):], action_id == "accept")
+        if item_id.startswith("msg-"):
+            return self._message_action(item_id[len("msg-"):], action_id)
+        if item_id == "receiving" and action_id == "cancel":
+            if not self.receiver.cancel_active():
+                return action_result(False, t("gone"))
+            return action_result(True, t("receive_cancelled"))
         if item_id.startswith("job-") and action_id == "cancel":
             job = self._jobs.get(item_id[len("job-"):])
             if job is None:
                 return action_result(False, "unknown transfer")
             job.cancelled.set()
             return action_result(True, t("reason_cancelled"))
-        if item_id.startswith("dev-") and action_id in ("trust", "untrust"):
-            device = self._registry.by_target(item_id[len("dev-"):])
-            if device is None:
-                return action_result(False, t("unknown_target"))
-            try:
-                if action_id == "trust":
-                    if not device.verified:
-                        return action_result(False, t("not_verified"))
-                    self._store.trust(device.info.fingerprint, device.info.alias)
-                    message = t("trusted_now", name=device.info.alias)
-                else:
-                    self._store.untrust(device.info.fingerprint)
-                    message = t("untrusted_now", name=device.info.alias)
-            except (SettingsError, OSError) as error:
-                raise PluginCallError(str(error)) from None
+        if item_id == "problem" and action_id == "retry":
+            if self.rebind():
+                return action_result(True, t("retried"))
+            return action_result(False, t("still_busy", port=self.port))
+        if item_id == "devices" and action_id == "search":
+            self._last_announce = 0.0
+            self.refresh_devices()
+            self.check_devices(0.0)
             self.emit_card_changed()
-            return action_result(True, message)
+            return action_result(True, t("searching"))
+        if item_id.startswith("dev-") and action_id == "send":
+            # Only a BlueFerry without plugin API 1.4 calls this; newer ones
+            # ask for files and call SendFiles with the action's send_to.
+            return action_result(False, t("use_send_to"))
+        if item_id.startswith("dev-") and action_id in ("trust", "untrust"):
+            return self._trust_action(item_id[len("dev-"):], action_id == "trust")
         if action_id == "open-folder":
             return self._open_folder()
         return action_result(False, "unknown action")
+
+    def _message_action(self, message_id: str, action_id: str) -> str:
+        message = self._message(message_id)
+        if message is None:
+            return action_result(False, t("gone"))
+        if action_id == "copy":
+            return self._copy_message(message_id)
+        if action_id == "open" and _is_web_link(message.text):
+            # The core opens http(s) links in the browser.
+            return action_result(True, None, message.text.strip())
+        if action_id == "dismiss":
+            with self._lock:
+                if message in self._messages:
+                    self._messages.remove(message)
+            self.emit_card_changed()
+            return action_result(True)
+        return action_result(False, "unknown action")
+
+    def _trust_action(self, target_id: str, trust: bool) -> str:
+        device = self._registry.by_target(target_id)
+        if device is None:
+            return action_result(False, t("unknown_target"))
+        try:
+            if trust:
+                if not device.verified:
+                    return action_result(False, t("not_verified"))
+                self._store.trust(device.info.fingerprint, device.info.alias)
+                # The click is the consent: accepting without asking needs
+                # the switch on, so "Always accept" turns it on as well.
+                current = self._store.load()
+                if not current.auto_accept_trusted:
+                    self._store.save(replace(current, auto_accept_trusted=True))
+                message = t("trusted_now", name=device.info.alias)
+            else:
+                self._store.untrust(device.info.fingerprint)
+                message = t("untrusted_now", name=device.info.alias)
+        except (SettingsError, OSError) as error:
+            raise PluginCallError(str(error)) from None
+        self.emit_card_changed()
+        return action_result(True, message)
 
     def _resolve_result(self, pending_id: str, accept: bool) -> str:
         if not self.resolve(pending_id, accept):
@@ -765,12 +1028,17 @@ class LocalSendService(SurfacesService):
     def _open_folder(self) -> str:
         target = self._settings().target_dir
         try:
-            fs.prepare_root(target)
+            root = fs.prepare_root(target)
         except (OSError, fs.UnsafePath) as error:
             return action_result(False, str(error))
-        # Not via open_uri: the core opens file:// only below the plugin
-        # cache, and the download folder is elsewhere.
-        if not self._opener(target.resolve().as_uri()):
+        # The files just received, selected in the file manager; else the
+        # folder. Not via open_uri: the core opens file:// only below the
+        # plugin cache, and the download folder is elsewhere.
+        received = [path for path in self._last_received
+                    if path.is_file() and root in path.resolve().parents]
+        if received and self._reveal([path.as_uri() for path in received[:50]]):
+            return action_result(True)
+        if not self._opener(root.as_uri()):
             return action_result(False, "no file manager found")
         return action_result(True)
 
@@ -798,6 +1066,7 @@ class LocalSendService(SurfacesService):
             "interfaces": settings.interfaces,
             "http_scan": settings.http_scan,
             "allow_http_send": settings.allow_http_send,
+            "autostart": autostart.autostart_enabled(self._autostart_home),
         }
 
     @staticmethod
@@ -873,6 +1142,13 @@ class LocalSendService(SurfacesService):
             self._store.save(updated)
         except (SettingsError, OSError) as error:
             raise ConfigError("", f"could not store the settings: {error}") from None
+        if "autostart" in values:
+            wanted = bool(values["autostart"])
+            if wanted != autostart.autostart_enabled(self._autostart_home):
+                try:
+                    autostart.set_autostart(wanted, self._autostart_home)
+                except OSError as error:
+                    raise ConfigError("autostart", f"could not change it: {error}") from None
         network_changed = (updated.port, updated.interfaces) != (current.port, current.interfaces)
         if network_changed or updated.visible != current.visible:
             self.restart()

@@ -251,7 +251,7 @@ class LocalSendService(SurfacesService):
         )
         self._active_interfaces: list[Interface] = []
         self._problem = ""
-        self._pending: dict[str, Pending] = {}
+        self._incoming: dict[str, Pending] = {}
         self._jobs: dict[str, SendJob] = {}
         self._recent: deque[Transfer] = deque(maxlen=MAX_RECENT)
         self._recorded: set[str] = set()
@@ -420,7 +420,7 @@ class LocalSendService(SurfacesService):
         self._multicast.stop()
         with self._bind_lock:
             self._servers.stop()
-        for pending in list(self._pending.values()):
+        for pending in list(self._incoming.values()):
             pending.event.set()
         for job in list(self._jobs.values()):
             job.cancelled.set()
@@ -630,7 +630,7 @@ class LocalSendService(SurfacesService):
         self._registry.seen(info, address)
         pending = Pending(secrets.token_hex(6), request, address, time.monotonic())
         with self._lock:
-            self._pending[pending.id] = pending
+            self._incoming[pending.id] = pending
         size = fs.human_size(request.total_size, german=german())
         count = len(request.files)
         body = (t("wants_to_send_one", name=info.alias, size=size) if count == 1
@@ -640,14 +640,14 @@ class LocalSendService(SurfacesService):
         self.emit_card_changed()
         pending.event.wait(self._decision_timeout)
         with self._lock:
-            self._pending.pop(pending.id, None)
+            self._incoming.pop(pending.id, None)
         self.emit_card_changed()
         log.info("upload request %s", "accepted" if pending.accepted else "declined")
         return pending.accepted
 
     def resolve(self, pending_id: str, accept: bool) -> bool:
         with self._lock:
-            pending = self._pending.get(pending_id)
+            pending = self._incoming.get(pending_id)
         if pending is None:
             return False
         pending.accepted = accept
@@ -850,7 +850,7 @@ class LocalSendService(SurfacesService):
         items: list[CardItem] = []
         de = german()
         with self._lock:
-            pendings = sorted(self._pending.values(), key=lambda p: p.created)
+            pendings = sorted(self._incoming.values(), key=lambda p: p.created)
             jobs = [j for j in self._jobs.values() if j.state in ("waiting", "sending")]
             messages = list(self._messages)
         if self._problem:

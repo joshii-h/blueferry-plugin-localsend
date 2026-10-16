@@ -84,8 +84,8 @@ blueferry plugins install https://github.com/joshii-h/blueferry-plugin-localsend
 
 or pick "LocalSend" in BlueFerry's settings, Plugins. BlueFerry shows source,
 version, capabilities and the command it will run, and installs only after
-you confirm. Version 0.4.0 (unreleased) needs a BlueFerry with plugin API
-1.5 (`blueferry-plugin-api` 1.5.0, not released yet); an older BlueFerry
+you confirm. Version 0.4.0 (2026-10-16) needs a BlueFerry with plugin API
+1.5 (`blueferry-plugin-api` 1.5.0); an older BlueFerry
 ignores its manifest. Version 0.3.0 is the last one for plugin API 1.4.
 
 BlueFerry starts plugins on first use. To be reachable right after login,

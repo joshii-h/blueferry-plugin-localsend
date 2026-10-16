@@ -1,4 +1,5 @@
-"""Plugin1 surfaces (API 1.2, ``send_to`` from 1.4): ``card``, ``share``, ``notify``.
+"""Plugin1 surfaces (API 1.2, ``send_to`` from 1.4, popups from 1.5): ``card``,
+``share``, ``notify``.
 
 Implemented strictly from the shared spec (PLUGIN-SURFACES-v1.2): plugins
 never ship UI, they hand the core JSON and content-free signals.
@@ -6,8 +7,11 @@ never ship UI, they hand the core JSON and content-free signals.
 - ``card``: ``GetCardItems() -> s``, ``InvokeAction(s item, s action, s args) -> s``,
   signal ``CardChanged()``.
 - ``share``: ``ShareTargets() -> s``, ``SendFiles(s target, as paths) -> s``.
-- ``notify``: signal ``Notify(s title, s body, s icon, s action_label, s action_id)``;
-  a click comes back as ``InvokeAction("notify", action_id, "{}")``.
+- ``notify`` (API 1.5): the popup waits in the plugin, the content-free signal
+  ``NotifyChanged()`` tells the core to fetch it with
+  ``GetPendingNotification()``; both come from plugin-api's
+  :class:`~blueferry.plugin_api.service.NotifyService`. A click comes back as
+  ``InvokeAction("notify", action_id, "{}")``.
 
 All of them live on the existing ``io.weirdware.BlueFerry.Plugin1``
 interface at the plugin's object path (spec section "D-Bus placement"); the
@@ -21,7 +25,7 @@ from dataclasses import dataclass, field
 import dbus
 import dbus.service
 from blueferry.plugin_api import PLUGIN_INTERFACE
-from blueferry.plugin_api.service import PluginService
+from blueferry.plugin_api.service import NotifyService
 
 MAX_ITEMS = 8
 MAX_ACTIONS = 3
@@ -84,8 +88,15 @@ def action_result(ok: bool, message: str | None = None, open_uri: str | None = N
     return json.dumps({"ok": ok, "message": message, "open_uri": open_uri})
 
 
-class SurfacesService(PluginService):
-    """Base class for a plugin with the card, share and notify capabilities."""
+class SurfacesService(NotifyService):
+    """Base class for a plugin with the card, share and notify capabilities.
+
+    Popups go through the inherited :meth:`NotifyService.emit_notify`
+    (thread-safe queue, ``NotifyChanged()``, ``GetPendingNotification()``).
+    The card and share methods and ``InvokeAction`` below are this plugin's
+    own; they come first in the MRO, so ``InvokeAction`` with the item
+    ``"notify"`` reaches :meth:`invoke_action` here as before.
+    """
 
     # ---- hooks (worker thread unless noted) -----------------------------
 
@@ -105,13 +116,6 @@ class SurfacesService(PluginService):
 
     def emit_card_changed(self) -> None:
         self._to_main(self.CardChanged)
-
-    def emit_notify(
-        self, title: str, body: str, icon: str, action_label: str = "", action_id: str = "",
-    ) -> None:
-        values = (clip(title, MAX_TITLE), clip(body, MAX_SUBTITLE), icon,
-                  clip(action_label, MAX_LABEL), action_id)
-        self._to_main(lambda: self.Notify(*values))
 
     # ---- card -----------------------------------------------------------
 
@@ -169,9 +173,3 @@ class SurfacesService(PluginService):
         target = str(target_id)[:128]
         files = [str(p) for p in list(paths)[:MAX_PATHS]]
         self.run_async(lambda: json.dumps(self.send_files(target, files)), reply, error)
-
-    # ---- notify ---------------------------------------------------------
-
-    @dbus.service.signal(PLUGIN_INTERFACE, signature="sssss")
-    def Notify(self, title, body, icon, action_label, action_id) -> None:
-        """A desktop notification request; the core applies its policy."""

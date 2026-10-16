@@ -348,7 +348,7 @@ def test_hidden_plugin_does_not_announce(tmp_path, plugins) -> None:
 
 def test_manifest_declares_the_surfaces_and_settings(manifest) -> None:
     assert manifest.id == PLUGIN_ID
-    assert manifest.api_version == 1 and manifest.api_minor == 4
+    assert manifest.api_version == 1 and manifest.api_minor == 5
     assert manifest.replaces_tools == ("localsend",)
     assert manifest.config_test is True and manifest.config_login == ""
     assert manifest.min_blueferry == "0.8.1"
@@ -424,9 +424,54 @@ def test_all_surfaces_live_on_plugin1() -> None:
     assert set(table) - {"org.freedesktop.DBus.Introspectable"} == {PLUGIN_INTERFACE}
     members = set(table[PLUGIN_INTERFACE])
     assert {"GetCardItems", "CardChanged", "InvokeAction", "ShareTargets", "SendFiles",
-            "Notify", "GetInfo", "Status"} <= members
+            "NotifyChanged", "GetPendingNotification", "GetInfo", "Status"} <= members
     assert table[PLUGIN_INTERFACE]["SendFiles"]._dbus_in_signature == "sas"
-    assert table[PLUGIN_INTERFACE]["Notify"]._dbus_signature == "sssss"
+    # plugin-api 1.5: the popup text no longer travels on the bus.
+    assert "Notify" not in members
+    assert table[PLUGIN_INTERFACE]["NotifyChanged"]._dbus_signature == ""
+
+
+def test_own_surface_methods_win_over_notify_service() -> None:
+    """NotifyService brings the popup queue; the card, share and action
+    methods on the bus stay this plugin's own."""
+    from blueferry.plugin_api.service import NotifyService
+
+    from blueferry_localsend.surfaces import SurfacesService
+
+    assert issubclass(LocalSendService, NotifyService)
+    assert not hasattr(SurfacesService, "Notify")
+    for name in ("InvokeAction", "GetCardItems", "ShareTargets", "SendFiles"):
+        assert getattr(LocalSendService, name) is SurfacesService.__dict__[name], name
+    assert LocalSendService.emit_notify is NotifyService.emit_notify
+    assert LocalSendService.GetPendingNotification is NotifyService.GetPendingNotification
+
+
+def test_popup_arrives_via_notify_changed_and_its_button_works(plugins) -> None:
+    """plugin-api 1.5: emit_notify queues the popup, NotifyChanged() carries
+    nothing, the host fetches it with GetPendingNotification(); a click on
+    its button comes back as InvokeAction("notify", ...)."""
+    bob, bob_host = plugins("bob")
+    signals: list[tuple] = []
+    fetch = bob_host._on_notify_changed
+
+    def on_notify_changed(*args) -> None:
+        signals.append(args)
+        fetch(*args)
+
+    bob.NotifyChanged = on_notify_changed
+    bob.emit_notify("LocalSend", "Received 1 file from alice (1 KB)", "folder-download",
+                    "Open folder", "open-folder")
+    bob_host.wait_for(lambda: bob_host.notifications)
+    assert signals == [()]
+    assert bob_host.notifications == [(
+        "LocalSend", "Received 1 file from alice (1 KB)", "folder-download",
+        "Open folder", "open-folder",
+    )]
+    # The queue is empty once fetched.
+    assert json.loads(bob_host.call("GetPendingNotification")) == {
+        "notification": None, "more": False}
+    assert bob_host.click_notification()["ok"] is True
+    assert plugins.opened[-1].endswith("/bob/inbox")
 
 
 def test_card_changed_is_throttled_but_the_last_change_arrives(tmp_path, plugins) -> None:

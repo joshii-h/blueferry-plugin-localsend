@@ -8,9 +8,11 @@ the [LocalSend protocol v2](https://github.com/localsend/protocol) itself.
 Your iPhone (or any device running LocalSend) sees this computer as a
 LocalSend device, and BlueFerry can send files to it. It runs as its own
 process on the session bus and talks to BlueFerry only through
-`blueferry.plugin_api` (plugin API 1.4: capabilities `card`, `share` and
+`blueferry.plugin_api` (plugin API 1.5: capabilities `card`, `share` and
 `notify`, "Send files…" right on each device, a guided settings form with
-"Test connection", a log file; see `PLUGINS.md` in the BlueFerry
+"Test connection", a log file; popups wait in the plugin and BlueFerry
+fetches them after the content-free `NotifyChanged()` signal, so their text
+never goes out on the session bus; see `PLUGINS.md` in the BlueFerry
 repository).
 
 > **On the iPhone, LocalSend must be open (in the foreground) to receive.**
@@ -82,8 +84,9 @@ blueferry plugins install https://github.com/joshii-h/blueferry-plugin-localsend
 
 or pick "LocalSend" in BlueFerry's settings, Plugins. BlueFerry shows source,
 version, capabilities and the command it will run, and installs only after
-you confirm. This plugin needs a BlueFerry with plugin API 1.4 (0.8.1 or
-newer from the branch with guided settings and plugin logs).
+you confirm. Version 0.4.0 (unreleased) needs a BlueFerry with plugin API
+1.5 (`blueferry-plugin-api` 1.5.0, not released yet); an older BlueFerry
+ignores its manifest. Version 0.3.0 is the last one for plugin API 1.4.
 
 BlueFerry starts plugins on first use. To be reachable right after login,
 turn on **Start at login** in the plugin's settings (or run
@@ -184,7 +187,8 @@ python3 -m venv --system-site-packages .venv   # dbus-python, PyGObject from the
 The tests run two plugin instances against each other over HTTPS on
 localhost, with an in-memory multicast bus and a fake BlueFerry core
 (`tests/fakehost.py`, the kit's `FakeHost`) that checks every reply against
-the plugin API 1.4 limits. They use the JSON examples of the LocalSend spec and LocalSend's own
+the plugin API 1.5 limits (popups fetched with `GetPendingNotification()`
+like the daemon does). They use the JSON examples of the LocalSend spec and LocalSend's own
 certificate test vector. Compatibility with the real LocalSend apps has not
 been tested yet.
 

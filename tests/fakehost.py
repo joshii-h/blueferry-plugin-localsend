@@ -1,9 +1,12 @@
 """The kit's FakeHost, with this suite's names.
 
 :class:`blueferry_plugin_kit.testing.FakeHost` plays the BlueFerry core side
-of PLUGIN-SURFACES v1.2: it calls the plugin's D-Bus methods in-process (no
-bus), checks every reply against the limits of the spec, and records the
-content-free ``CardChanged()`` and the ``Notify(...)`` signals.
+of the plugin API: it calls the plugin's D-Bus methods in-process (no bus),
+checks every reply against the limits of the spec and counts the
+content-free ``CardChanged()``. Popups follow plugin-api 1.5 like the
+daemon: on the content-free ``NotifyChanged()`` it fetches every waiting
+popup with ``GetPendingNotification()`` into ``notifications`` (5-tuples);
+the removed ``Notify(...)`` signal is a ``SpecViolation``.
 """
 from __future__ import annotations
 

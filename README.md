@@ -86,7 +86,9 @@ or pick "LocalSend" in BlueFerry's settings, Plugins. BlueFerry shows source,
 version, capabilities and the command it will run, and installs only after
 you confirm. Version 0.4.0 (2026-10-16) needs a BlueFerry with plugin API
 1.5 (`blueferry-plugin-api` 1.5.0); an older BlueFerry
-ignores its manifest. Version 0.3.0 is the last one for plugin API 1.4.
+ignores its manifest. Version 0.4.1 (2026-11-02) takes `blueferry-plugin-api`
+1.6.0 from the official repository and still runs on any BlueFerry with
+plugin API 1.5. Version 0.3.0 is the last one for plugin API 1.4.
 
 BlueFerry starts plugins on first use. To be reachable right after login,
 turn on **Start at login** in the plugin's settings (or run
